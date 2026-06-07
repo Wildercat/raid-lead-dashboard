@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: beloren-raid-dashboard
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: WARCRAFT_LOGS_CLIENT_ID
+        sync: false
+      - key: WARCRAFT_LOGS_CLIENT_SECRET
+        sync: false

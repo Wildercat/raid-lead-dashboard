@@ -1,0 +1,13 @@
+{
+  "name": "beloren-raid-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18.17"
+  },
+  "scripts": {
+    "start": "node app/server.mjs",
+    "test": "node --check app/server.mjs && node --check wcl-beloren-analyze.mjs && node --check app/public/app.js"
+  }
+}

@@ -1,0 +1,6 @@
+.env
+app/*.log
+wcl-beloren-spike.mjs
+node_modules/
+npm-debug.log*
+.DS_Store

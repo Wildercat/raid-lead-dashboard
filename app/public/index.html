@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Raid Lead Dashboard</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="topbar" aria-label="Report input">
+        <div>
+          <h1>Belo'ren Review</h1>
+          <p id="subtitle">Evidence-first Warcraft Logs triage</p>
+        </div>
+        <form id="report-form" class="report-form">
+          <input
+            id="report-url"
+            name="reportUrl"
+            type="url"
+            value="https://www.warcraftlogs.com/reports/c28N14ZFVxybzAHW?type=summary"
+            aria-label="Warcraft Logs report URL"
+            required
+          />
+          <button type="submit">Analyze</button>
+        </form>
+      </section>
+
+      <section id="status" class="status" aria-live="polite"></section>
+
+      <section id="dashboard" class="dashboard is-empty">
+        <nav class="tabs" aria-label="Dashboard views">
+          <button class="tab is-active" type="button" data-tab="latest">Latest Wipe</button>
+          <button class="tab" type="button" data-tab="night">Whole Night</button>
+        </nav>
+
+        <section id="latest-tab" class="tab-panel">
+          <div class="summary-grid">
+            <div class="metric pull-metric">
+              <label class="metric-label" for="pull-select">Pull</label>
+              <select id="pull-select" name="pullId" aria-label="Pull to analyze" disabled>
+                <option value="latest">Latest wipe</option>
+              </select>
+            </div>
+            <div id="summary-grid" class="summary-grid summary-grid-rest"></div>
+          </div>
+
+          <section class="panel panel-wide">
+            <header class="panel-header">
+              <h2>Wipe-Level Failures</h2>
+              <span id="wipe-count" class="count">0</span>
+            </header>
+            <div id="wipe-failures"></div>
+          </section>
+
+          <div class="module-grid">
+            <section class="panel deaths-panel">
+              <header class="panel-header">
+                <h2>Deaths</h2>
+                <span id="death-count" class="count">0</span>
+              </header>
+              <div id="deaths"></div>
+            </section>
+
+            <section class="panel">
+              <header class="panel-header">
+              <h2>Mistakes</h2>
+                <span id="mistake-count" class="count">0</span>
+              </header>
+              <div id="mistakes"></div>
+            </section>
+
+            <section class="panel">
+              <header class="panel-header">
+              <h2>Correct Radiant Echoes Soaks</h2>
+              <span id="soak-count" class="count">0</span>
+            </header>
+            <div id="echo-soaks"></div>
+          </section>
+
+            <section class="panel">
+              <header class="panel-header">
+                <h2>Eruption Interrupts</h2>
+                <span id="interrupt-count" class="count">0</span>
+              </header>
+              <div id="eruption-interrupts"></div>
+            </section>
+
+            <section class="panel">
+              <header class="panel-header">
+                <h2>Healthstone / Potions</h2>
+                <span id="consumable-count" class="count">0</span>
+              </header>
+              <div id="consumables"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="night-tab" class="tab-panel is-hidden">
+          <div id="night-summary-grid" class="summary-grid"></div>
+
+          <div class="module-grid">
+            <section class="panel">
+              <header class="panel-header">
+                <h2>Mistakes By Player</h2>
+                <span id="night-mistake-count" class="count">0</span>
+              </header>
+              <div id="night-mistakes"></div>
+            </section>
+
+            <section class="panel">
+              <header class="panel-header">
+                <h2>Correct Radiant Echoes Soaks</h2>
+                <span id="night-soak-count" class="count">0</span>
+              </header>
+              <div id="night-echo-soaks"></div>
+            </section>
+
+            <section class="panel">
+              <header class="panel-header">
+                <h2>Eruption Interrupts</h2>
+                <span id="night-interrupt-count" class="count">0</span>
+              </header>
+              <div id="night-eruption-interrupts"></div>
+            </section>
+
+            <section class="panel">
+              <header class="panel-header">
+                <h2>Healthstone / Potions</h2>
+                <span id="night-consumable-count" class="count">0</span>
+              </header>
+              <div id="night-consumables"></div>
+            </section>
+          </div>
+        </section>
+      </section>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
