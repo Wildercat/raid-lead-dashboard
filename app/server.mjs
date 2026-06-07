@@ -37,7 +37,7 @@ createServer(async (request, response) => {
         pullId: scope === "night" ? "night" : body.pullId || "latest",
         scope,
       });
-      if (analysisCache.has(cacheKey)) {
+      if (!body.fresh && analysisCache.has(cacheKey)) {
         return sendJson(response, 200, analysisCache.get(cacheKey));
       }
 

@@ -2,10 +2,15 @@ const form = document.querySelector("#report-form");
 const reportUrlInput = document.querySelector("#report-url");
 const pullSelect = document.querySelector("#pull-select");
 const statusEl = document.querySelector("#status");
+const statusTextEl = document.querySelector("#status-text");
 const dashboardEl = document.querySelector("#dashboard");
 const pullCache = new Map();
 const nightCache = new Map();
 let currentPullData = null;
+let spellMap = {};
+let livePollTimer = null;
+let latestKnownFightId = null;
+let activeTab = "latest";
 
 const els = {
   summaryGrid: document.querySelector("#summary-grid"),
@@ -14,30 +19,37 @@ const els = {
   deaths: document.querySelector("#deaths"),
   mistakes: document.querySelector("#mistakes"),
   echoSoaks: document.querySelector("#echo-soaks"),
+  quillSoaks: document.querySelector("#quill-soaks"),
   eruptionInterrupts: document.querySelector("#eruption-interrupts"),
   consumables: document.querySelector("#consumables"),
   nightMistakes: document.querySelector("#night-mistakes"),
   nightEchoSoaks: document.querySelector("#night-echo-soaks"),
+  nightQuillSoaks: document.querySelector("#night-quill-soaks"),
   nightEruptionInterrupts: document.querySelector("#night-eruption-interrupts"),
   nightConsumables: document.querySelector("#night-consumables"),
+  liveLogControl: document.querySelector("#live-log-control"),
+  liveScanToggle: document.querySelector("#live-scan-toggle"),
+  liveLogLabel: document.querySelector("#live-log-label"),
+  reportLink: document.querySelector("#report-link"),
+  statusTabs: document.querySelector("#status-tabs"),
+  dashboardControls: document.querySelector(".dashboard-controls"),
   wipeCount: document.querySelector("#wipe-count"),
   deathCount: document.querySelector("#death-count"),
   mistakeCount: document.querySelector("#mistake-count"),
   soakCount: document.querySelector("#soak-count"),
+  quillCount: document.querySelector("#quill-count"),
   interruptCount: document.querySelector("#interrupt-count"),
   consumableCount: document.querySelector("#consumable-count"),
   nightMistakeCount: document.querySelector("#night-mistake-count"),
   nightSoakCount: document.querySelector("#night-soak-count"),
+  nightQuillCount: document.querySelector("#night-quill-count"),
   nightInterruptCount: document.querySelector("#night-interrupt-count"),
   nightConsumableCount: document.querySelector("#night-consumable-count"),
 };
 
 document.querySelectorAll(".tab").forEach((button) => {
   button.addEventListener("click", async () => {
-    document.querySelectorAll(".tab").forEach((tab) => tab.classList.remove("is-active"));
-    document.querySelectorAll(".tab-panel").forEach((panel) => panel.classList.add("is-hidden"));
-    button.classList.add("is-active");
-    document.querySelector(`#${button.dataset.tab}-tab`).classList.remove("is-hidden");
+    setActiveTab(button.dataset.tab);
 
     if (button.dataset.tab === "night") {
       await loadWholeNight(reportUrlInput.value.trim());
@@ -48,6 +60,7 @@ document.querySelectorAll(".tab").forEach((button) => {
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   pullSelect.value = "latest";
+  setActiveTab("latest");
   await analyze(reportUrlInput.value.trim(), "latest");
 });
 
@@ -56,15 +69,21 @@ pullSelect.addEventListener("change", async () => {
   await analyze(reportUrlInput.value.trim(), pullSelect.value);
 });
 
+els.liveScanToggle.addEventListener("change", () => {
+  updateScanLabel();
+  updateLivePolling();
+});
+
 async function analyze(reportUrl, pullId = pullSelect.value || "latest") {
-  statusEl.className = "status";
-  statusEl.textContent = "Fetching pull events...";
+  setStatus("Fetching pull events...", { loading: true });
   const cacheKey = pullCacheKey(reportUrl, pullId);
   if (pullCache.has(cacheKey)) {
     const cached = pullCache.get(cacheKey);
     renderDashboard(cached);
-    statusEl.textContent = `${cached.report.title} - ${cached.fight.name}, pull ${cached.fight.id}`;
+    setStatus(cached.report.title);
     dashboardEl.classList.remove("is-empty");
+    els.statusTabs.classList.remove("is-hidden");
+    els.liveLogControl.classList.remove("is-hidden");
     return;
   }
 
@@ -74,19 +93,20 @@ async function analyze(reportUrl, pullId = pullSelect.value || "latest") {
     pullCache.set(cacheKey, payload);
     pullCache.set(pullCacheKey(reportUrl, payload.fight.id), payload);
     renderDashboard(payload);
-    statusEl.textContent = `${payload.report.title} - ${payload.fight.name}, pull ${payload.fight.id}`;
+    setStatus(payload.report.title);
     dashboardEl.classList.remove("is-empty");
+    els.statusTabs.classList.remove("is-hidden");
+    els.liveLogControl.classList.remove("is-hidden");
   } catch (error) {
-    statusEl.className = "status error";
-    statusEl.textContent = error.message;
+    setStatus(error.message, { error: true });
   }
 }
 
-async function fetchAnalysis({ reportUrl, pullId = "latest", scope }) {
+async function fetchAnalysis({ reportUrl, pullId = "latest", scope, fresh = false }) {
   const response = await fetch("/api/analyze", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ reportUrl, pullId, scope }),
+    body: JSON.stringify({ reportUrl, pullId, scope, fresh }),
   });
 
   const payload = await response.json();
@@ -98,28 +118,88 @@ async function loadWholeNight(reportUrl) {
   if (!reportUrl || dashboardEl.classList.contains("is-empty")) return;
   const cacheKey = nightCacheKey(reportUrl);
   if (nightCache.has(cacheKey)) {
-    renderNightDashboard(nightCache.get(cacheKey).wholeNight);
+    const cached = nightCache.get(cacheKey);
+    renderNightDashboard(cached.wholeNight);
+    setStatus(cached.report.title);
     return;
   }
 
-  statusEl.className = "status";
-  statusEl.textContent = "Fetching whole-night events...";
+  setStatus("Fetching whole-night events...", { loading: true });
 
   try {
     const payload = await fetchAnalysis({ reportUrl, scope: "night" });
+    spellMap = payload.spells || spellMap;
     nightCache.set(cacheKey, payload);
     renderNightDashboard(payload.wholeNight);
-    statusEl.textContent = `${payload.report.title} - Belo'ren whole night`;
+    setStatus(payload.report.title);
   } catch (error) {
-    statusEl.className = "status error";
-    statusEl.textContent = error.message;
+    setStatus(error.message, { error: true });
   }
+}
+
+function updateLiveState(data) {
+  latestKnownFightId = Math.max(latestKnownFightId || 0, data.fight.id);
+  updateScanLabel();
+  updateLivePolling();
+}
+
+function updateLivePolling() {
+  if (livePollTimer) {
+    clearInterval(livePollTimer);
+    livePollTimer = null;
+  }
+
+  if (!currentPullData || !els.liveScanToggle.checked) return;
+
+  livePollTimer = setInterval(scanForNewPull, 30000);
+}
+
+function updateScanLabel() {
+  els.liveLogLabel.textContent = els.liveScanToggle.checked
+    ? "Scanning for new pulls every 30s"
+    : "Scan for new pulls";
+}
+
+async function scanForNewPull() {
+  if (!currentPullData || pullSelect.value !== "latest" || !els.liveScanToggle.checked) return;
+
+  try {
+    const reportUrl = reportUrlInput.value.trim();
+    const payload = await fetchAnalysis({ reportUrl, pullId: "latest", scope: "pull", fresh: true });
+    if (payload.fight.id > (latestKnownFightId || 0)) {
+      pullCache.set(pullCacheKey(reportUrl, "latest"), payload);
+      pullCache.set(pullCacheKey(reportUrl, payload.fight.id), payload);
+      renderDashboard(payload);
+      setStatus(payload.report.title);
+    } else {
+      updateLiveState(payload);
+    }
+  } catch (error) {
+    setStatus(`Live scan failed: ${error.message}`, { error: true });
+  }
+}
+
+function setStatus(message, { loading = false, error = false } = {}) {
+  statusTextEl.textContent = message;
+  statusEl.classList.toggle("is-loading", loading);
+  statusEl.classList.toggle("error", error);
+}
+
+function setActiveTab(tabName) {
+  activeTab = tabName;
+  document.querySelectorAll(".tab").forEach((tab) => tab.classList.toggle("is-active", tab.dataset.tab === tabName));
+  document.querySelectorAll(".tab-panel").forEach((panel) => panel.classList.add("is-hidden"));
+  document.querySelector(`#${tabName}-tab`).classList.remove("is-hidden");
+  els.dashboardControls.classList.toggle("is-hidden", tabName === "night");
 }
 
 function renderDashboard(data) {
   const latest = data.latestWipe;
   const summary = data.summary;
   currentPullData = data;
+  spellMap = data.spells || spellMap;
+  els.reportLink.href = reportUrlForFight(data.report.code, data.fight.id);
+  updateLiveState(data);
 
   renderPullOptions(data.report.pulls || [], data.fight.id);
 
@@ -127,13 +207,13 @@ function renderDashboard(data) {
     metric("Duration", data.fight.duration),
     metric("Boss HP", `${Number(data.fight.bossPercentage).toFixed(1)}%`),
     metric("Deaths", summary.deathCount),
-    metric("Mistakes", summary.likelyMistakeCount),
   ].join("");
 
   els.wipeCount.textContent = latest.wipeLevelFailures.length;
   els.deathCount.textContent = latest.deaths.length;
   els.mistakeCount.textContent = latest.likelyMistakes.length + latest.wipeLevelFailures.length;
   els.soakCount.textContent = latest.correctEchoSoakLeaderboard.length;
+  els.quillCount.textContent = latest.correctQuillSoakLeaderboard.length;
   els.interruptCount.textContent = latest.eruptionInterruptLeaderboard.length;
   els.consumableCount.textContent = latest.consumableLeaderboard.length;
 
@@ -141,6 +221,7 @@ function renderDashboard(data) {
   els.deaths.innerHTML = renderDeaths(latest.deaths, latest.wipeLevelFailures);
   els.mistakes.innerHTML = renderMistakes(latest.likelyMistakes, latest.wipeLevelFailures);
   els.echoSoaks.innerHTML = renderEchoSoaks(latest.correctEchoSoakLeaderboard);
+  els.quillSoaks.innerHTML = renderQuillSoaks(latest.correctQuillSoakLeaderboard);
   els.eruptionInterrupts.innerHTML = renderEruptionInterrupts(latest.eruptionInterruptLeaderboard);
   els.consumables.innerHTML = renderConsumables(latest.consumableLeaderboard);
 
@@ -158,18 +239,19 @@ function renderNightDashboard(night) {
   els.nightSummaryGrid.innerHTML = [
     metric("Pulls", night.pullCount),
     metric("Wipes", night.wipeCount),
-    metric("Kills", night.killCount),
     metric("Mistake Players", night.mistakeLeaderboard.length),
     metric("Consumable Users", night.consumableLeaderboard.length),
   ].join("");
 
   els.nightMistakeCount.textContent = night.mistakeLeaderboard.length;
   els.nightSoakCount.textContent = night.correctEchoSoakLeaderboard.length;
+  els.nightQuillCount.textContent = night.correctQuillSoakLeaderboard.length;
   els.nightInterruptCount.textContent = night.eruptionInterruptLeaderboard.length;
   els.nightConsumableCount.textContent = night.consumableLeaderboard.length;
 
   els.nightMistakes.innerHTML = renderNightMistakes(night.mistakeLeaderboard);
   els.nightEchoSoaks.innerHTML = renderEchoSoaks(night.correctEchoSoakLeaderboard);
+  els.nightQuillSoaks.innerHTML = renderQuillSoaks(night.correctQuillSoakLeaderboard);
   els.nightEruptionInterrupts.innerHTML = renderEruptionInterrupts(night.eruptionInterruptLeaderboard);
   els.nightConsumables.innerHTML = renderConsumables(night.consumableLeaderboard);
 }
@@ -178,12 +260,14 @@ function renderNightPlaceholder() {
   els.nightSummaryGrid.innerHTML = "";
   els.nightMistakeCount.textContent = 0;
   els.nightSoakCount.textContent = 0;
+  els.nightQuillCount.textContent = 0;
   els.nightInterruptCount.textContent = 0;
   els.nightConsumableCount.textContent = 0;
-  els.nightMistakes.innerHTML = empty("Open the Whole Night tab to load night-wide mistakes.");
-  els.nightEchoSoaks.innerHTML = empty("Open the Whole Night tab to load night-wide soaks.");
-  els.nightEruptionInterrupts.innerHTML = empty("Open the Whole Night tab to load night-wide interrupts.");
-  els.nightConsumables.innerHTML = empty("Open the Whole Night tab to load night-wide consumable usage.");
+  els.nightMistakes.innerHTML = empty("Loading night-wide mistakes.");
+  els.nightEchoSoaks.innerHTML = empty("Loading night-wide soaks.");
+  els.nightQuillSoaks.innerHTML = empty("Loading night-wide quill soaks.");
+  els.nightEruptionInterrupts.innerHTML = empty("Loading night-wide interrupts.");
+  els.nightConsumables.innerHTML = empty("Loading night-wide consumable usage.");
 }
 
 function renderPullOptions(pulls, selectedFightId) {
@@ -203,6 +287,10 @@ function renderPullOptions(pulls, selectedFightId) {
 
 function pullCacheKey(reportUrl, pullId) {
   return `${reportUrl}::${pullId || "latest"}`;
+}
+
+function reportUrlForFight(reportCode, fightId) {
+  return `https://www.warcraftlogs.com/reports/${encodeURIComponent(reportCode)}?fight=${encodeURIComponent(fightId)}&type=summary`;
 }
 
 function nightCacheKey(reportUrl) {
@@ -250,12 +338,13 @@ function renderWipeFailureMarker(row) {
 function renderDeathRow(row) {
   const mistake = row.likelyMistake ? row.likelyMistake.label : "";
   const cause = row.directDeathCause
-    ? `${escapeHtml(row.directDeathCause.abilityName)} (${formatNumber(row.directDeathCause.amount)})`
+    ? `${spell(row.directDeathCause.abilityId, row.directDeathCause.abilityName)} (${formatNumber(row.directDeathCause.amount)})`
     : "";
 
   return `<article class="death-row">
     <details class="death-details">
       <summary class="death-main">
+        <span class="death-order">#${row.order}</span>
         <span class="death-time">${escapeHtml(row.time)}</span>
         <span class="death-player">${player(row.player)}</span>
         <span class="death-cause">${cause}</span>
@@ -264,7 +353,7 @@ function renderDeathRow(row) {
       <div class="damage-events">${row.finalDamageEvents
         .map(
           (event) =>
-            `<span><strong>${escapeHtml(event.time)}</strong> ${escapeHtml(event.abilityName)} ${formatNumber(event.amount)}</span>`,
+            `<span class="damage-event"><strong class="damage-time">${escapeHtml(event.time)}</strong> ${spell(event.abilityId, event.abilityName)} <span class="damage-amount">${formatNumber(event.amount)}</span></span>`,
         )
         .join("")}</div>
     </details>
@@ -287,7 +376,7 @@ function renderMistakeRow(row) {
   return `<div class="mistake-row">
     <span class="mistake-time">${escapeHtml(row.time)}</span>
     <span>${player(row.player)}</span>
-    <span>${escapeHtml(row.mechanic)}</span>
+    <span>${spell(row.abilityId, row.abilityName)}</span>
     <span>${mistakePill(row.label)}</span>
     <span class="mistake-damage">${formatNumber(row.damageAmount)}</span>
   </div>`;
@@ -303,66 +392,76 @@ function renderMistakeWipeFailure(row) {
 
 function renderEchoSoaks(rows) {
   if (!rows.length) return empty("No correct Radiant Echoes soaks detected.");
-  return table(
-    ["Player", "Correct", "Light", "Void", "Wrong", "Deaths", "Survival"],
-    rows.map((row) => [
-      player(row.player),
-      row.totalCorrectSoaks,
-      row.lightSoaks,
-      row.voidSoaks,
-      row.wrongColorSoaks,
-      row.deathsFromSoaks,
-      row.survivalRate === null ? "" : `${Math.round(row.survivalRate * 100)}%`,
-    ]),
+  return leaderboardBars(
+    rows,
+    "totalCorrectSoaks",
+    (row) => [
+      `Light ${formatNumber(row.lightSoaks)}`,
+      `Void ${formatNumber(row.voidSoaks)}`,
+      `Immune ${formatNumber(row.immunitySoaks)}`,
+      `Wrong ${formatNumber(row.wrongColorSoaks)}`,
+    ],
+  );
+}
+
+function renderQuillSoaks(rows) {
+  if (!rows.length) return empty("No solo correct-color quill soaks detected.");
+  return leaderboardBars(
+    rows,
+    "totalCorrectQuills",
+    (row) => [
+      `Light ${formatNumber(row.lightQuills)}`,
+      `Void ${formatNumber(row.voidQuills)}`,
+      `Multi ${formatNumber(row.multiHitQuills)}`,
+    ],
   );
 }
 
 function renderEruptionInterrupts(rows) {
   if (!rows.length) return empty("No Light/Void Eruption interrupts detected.");
-  return table(
-    ["Player", "Total", "Light", "Void"],
-    rows.map((row) => [
-      player(row.player),
-      row.totalInterrupts,
-      row.lightEruptionInterrupts,
-      row.voidEruptionInterrupts,
-    ]),
+  return leaderboardBars(
+    rows,
+    "totalInterrupts",
+    (row) => [
+      `Light ${formatNumber(row.lightEruptionInterrupts)}`,
+      `Void ${formatNumber(row.voidEruptionInterrupts)}`,
+    ],
   );
 }
 
 function renderConsumables(rows) {
   if (!rows.length) return empty("No healthstone or health potion usage detected.");
-  return table(
-    ["Player", "Total", "Stone", "Potion", "Healing", "Overheal"],
-    rows.map((row) => [
-      player(row.player),
-      row.totalUses,
-      row.healthstoneUses,
-      row.healthPotionUses,
-      formatNumber(row.healing),
-      formatNumber(row.overheal),
-    ]),
+  return leaderboardBars(
+    rows,
+    "totalUses",
+    (row) => [
+      `Stone ${formatNumber(row.healthstoneUses)}`,
+      `Potion ${formatNumber(row.healthPotionUses)}`,
+      `Heal ${formatNumber(row.healing)}`,
+    ],
   );
 }
 
 function renderNightMistakes(rows) {
   if (!rows.length) return empty("No player mistakes detected by the current Beloren rules.");
+  const max = Math.max(...rows.map((row) => row.totalMistakes), 1);
   return `<div class="night-mistake-list">
     <div class="night-mistake-header">
       <span>Player</span>
       <span>Total</span>
       <span>Pulls</span>
     </div>
-    ${rows.map(renderNightMistakeRow).join("")}
+    ${rows.map((row) => renderNightMistakeRow(row, max)).join("")}
   </div>`;
 }
 
-function renderNightMistakeRow(row) {
+function renderNightMistakeRow(row, max) {
+  const width = Math.max(4, Math.round((row.totalMistakes / max) * 100));
   return `<article class="night-mistake-row">
     <details>
       <summary class="night-mistake-main">
         <span>${player(row.player)}</span>
-        <span>${formatNumber(row.totalMistakes)}</span>
+        <span class="bar-cell"><span class="bar-track"><span class="bar-fill ${classColorClass(row.player.class)}" style="width:${width}%"></span></span><strong>${formatNumber(row.totalMistakes)}</strong></span>
         <span>${formatNumber(row.pullCount)}</span>
       </summary>
       <div class="night-mistake-breakdown">
@@ -373,6 +472,22 @@ function renderNightMistakeRow(row) {
       </div>
     </details>
   </article>`;
+}
+
+function leaderboardBars(rows, primaryKey, detailsForRow) {
+  const max = Math.max(...rows.map((row) => Number(row[primaryKey] || 0)), 1);
+  return `<div class="bar-list">${rows
+    .map((row) => {
+      const value = Number(row[primaryKey] || 0);
+      const width = value > 0 ? Math.max(4, Math.round((value / max) * 100)) : 0;
+      return `<div class="bar-row">
+        <span class="bar-player">${player(row.player)}</span>
+        <span class="bar-visual"><span class="bar-track"><span class="bar-fill ${classColorClass(row.player.class)}" style="width:${width}%"></span></span></span>
+        <span class="bar-value">${formatNumber(value)}</span>
+        <span class="bar-details">${detailsForRow(row).map(escapeHtml).join(" | ")}</span>
+      </div>`;
+    })
+    .join("")}</div>`;
 }
 
 function table(headers, rows) {
@@ -421,9 +536,19 @@ function evidenceList(items = []) {
   return `<div class="evidence-list">${items
     .map(
       (item) =>
-        `<span>${escapeHtml(item.time)} ${escapeHtml(item.abilityName)} -> ${escapeHtml(item.target)} (${formatNumber(item.amount)})</span>`,
+        `<span>${escapeHtml(item.time)} ${spell(item.abilityId, item.abilityName)} -> ${escapeHtml(item.target)} (${formatNumber(item.amount)})</span>`,
     )
     .join("")}</div>`;
+}
+
+function spell(abilityId, fallbackName) {
+  const id = Number(abilityId || 0);
+  const meta = spellMap[id] || {};
+  const name = meta.name || fallbackName || `Ability ${id}`;
+  const icon = meta.icon ? `https://wow.zamimg.com/images/wow/icons/small/${escapeHtml(meta.icon)}` : "";
+  const iconHtml = icon ? `<img class="spell-icon" src="${icon}" alt="" loading="lazy" />` : "";
+  if (!id) return escapeHtml(name);
+  return `<a class="spell-link" href="https://www.wowhead.com/spell=${id}" data-wowhead="spell=${id}" target="_blank" rel="noreferrer">${iconHtml}<span>${escapeHtml(name)}</span></a>`;
 }
 
 function formatNumber(value) {

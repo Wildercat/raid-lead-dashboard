@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Raid Lead Dashboard</title>
     <link rel="stylesheet" href="/styles.css" />
+    <script>const whTooltips = { colorLinks: false, iconizeLinks: false, renameLinks: false };</script>
+    <script async src="https://wow.zamimg.com/widgets/power.js"></script>
   </head>
   <body>
     <main class="shell">
@@ -26,24 +28,39 @@
         </form>
       </section>
 
-      <section id="status" class="status" aria-live="polite"></section>
-
-      <section id="dashboard" class="dashboard is-empty">
-        <nav class="tabs" aria-label="Dashboard views">
+      <section id="status" class="status" aria-live="polite">
+        <span class="status-main">
+          <span id="status-spinner" class="status-spinner" aria-hidden="true"></span>
+          <span id="status-text"></span>
+        </span>
+        <nav id="status-tabs" class="tabs status-tabs is-hidden" aria-label="Dashboard views">
           <button class="tab is-active" type="button" data-tab="latest">Latest Wipe</button>
           <button class="tab" type="button" data-tab="night">Whole Night</button>
         </nav>
+        <div id="live-log-control" class="scan-control live-log-control is-hidden">
+          <label class="switch-label">
+            <input id="live-scan-toggle" type="checkbox" />
+            <span class="switch" aria-hidden="true"></span>
+            <span id="live-log-label">Scan for new pulls</span>
+          </label>
+        </div>
+      </section>
+
+      <section id="dashboard" class="dashboard is-empty">
+        <div class="summary-grid dashboard-controls">
+          <div class="metric pull-metric">
+            <div class="metric-line">
+              <label class="metric-label" for="pull-select">Pull</label>
+              <a id="report-link" class="report-link" href="#" target="_blank" rel="noreferrer">Open log</a>
+            </div>
+            <select id="pull-select" name="pullId" aria-label="Pull to analyze" disabled>
+              <option value="latest">Latest wipe</option>
+            </select>
+          </div>
+          <div id="summary-grid" class="summary-grid summary-grid-rest"></div>
+        </div>
 
         <section id="latest-tab" class="tab-panel">
-          <div class="summary-grid">
-            <div class="metric pull-metric">
-              <label class="metric-label" for="pull-select">Pull</label>
-              <select id="pull-select" name="pullId" aria-label="Pull to analyze" disabled>
-                <option value="latest">Latest wipe</option>
-              </select>
-            </div>
-            <div id="summary-grid" class="summary-grid summary-grid-rest"></div>
-          </div>
 
           <section class="panel panel-wide">
             <header class="panel-header">
@@ -77,6 +94,14 @@
             </header>
             <div id="echo-soaks"></div>
           </section>
+
+            <section class="panel">
+              <header class="panel-header">
+                <h2>Correct Quill Soaks</h2>
+                <span id="quill-count" class="count">0</span>
+              </header>
+              <div id="quill-soaks"></div>
+            </section>
 
             <section class="panel">
               <header class="panel-header">
@@ -114,6 +139,14 @@
                 <span id="night-soak-count" class="count">0</span>
               </header>
               <div id="night-echo-soaks"></div>
+            </section>
+
+            <section class="panel">
+              <header class="panel-header">
+                <h2>Correct Quill Soaks</h2>
+                <span id="night-quill-count" class="count">0</span>
+              </header>
+              <div id="night-quill-soaks"></div>
             </section>
 
             <section class="panel">

@@ -1,6 +1,7 @@
 .env
 app/*.log
 wcl-beloren-spike.mjs
+inspect-wcl.mjs
 node_modules/
 npm-debug.log*
 .DS_Store

@@ -47,6 +47,8 @@ const SPELLS = {
   melee: 1,
 };
 
+const TANK_SPEC_IDS = new Set([66, 73, 104, 250, 268, 581]);
+
 const ABILITY_NAMES = {
   [SPELLS.lightFeather]: "Light Feather",
   [SPELLS.voidFeather]: "Void Feather",
@@ -84,16 +86,16 @@ const COLOR_DAMAGE_RULES = {
     expectedFeather: "light",
     mechanic: "Radiant Echoes",
     correctLabel: "correct orb soak",
-    wrongLabel: "wrong-color orb soak",
-    deathLinkedLabel: "soaked wrong orb color",
+    wrongLabel: "wrong orb",
+    deathLinkedLabel: "wrong orb",
   },
   [SPELLS.voidEcho]: {
     color: "void",
     expectedFeather: "void",
     mechanic: "Radiant Echoes",
     correctLabel: "correct orb soak",
-    wrongLabel: "wrong-color orb soak",
-    deathLinkedLabel: "soaked wrong orb color",
+    wrongLabel: "wrong orb",
+    deathLinkedLabel: "wrong orb",
   },
   [SPELLS.lightQuill]: {
     color: "light",
@@ -122,6 +124,37 @@ const COLOR_DAMAGE_RULES = {
     mechanic: "Incubation of Flames",
     wrongLabel: "Egg DoT",
     deathLinkedLabel: "Egg DoT",
+  },
+};
+
+const FRONTAL_RULES = {
+  [SPELLS.lightEdict]: {
+    color: "light",
+    expectedFeather: "light",
+    mechanic: "Boss Frontal",
+    label: "wrong frontal color",
+    nonTankLabel: "stood in frontal",
+  },
+  [SPELLS.lightEdictPhysical]: {
+    color: "light",
+    expectedFeather: "light",
+    mechanic: "Boss Frontal",
+    label: "wrong frontal color",
+    nonTankLabel: "stood in frontal",
+  },
+  [SPELLS.voidEdict]: {
+    color: "void",
+    expectedFeather: "void",
+    mechanic: "Boss Frontal",
+    label: "wrong frontal color",
+    nonTankLabel: "stood in frontal",
+  },
+  [SPELLS.voidEdictPhysical]: {
+    color: "void",
+    expectedFeather: "void",
+    mechanic: "Boss Frontal",
+    label: "wrong frontal color",
+    nonTankLabel: "stood in frontal",
   },
 };
 
@@ -170,6 +203,7 @@ query ReportShell($code: String!) {
         abilities {
           gameID
           name
+          icon
         }
         actors {
           id
@@ -341,13 +375,28 @@ function actorMeta(actorById, id) {
   };
 }
 
+function actorRole(specByActor, id) {
+  const specID = specByActor?.get(id) || null;
+  return {
+    specID,
+    role: TANK_SPEC_IDS.has(specID) ? "tank" : "non_tank",
+  };
+}
+
+function playerMeta(actorById, specByActor, id) {
+  return {
+    ...actorMeta(actorById, id),
+    ...actorRole(specByActor, id),
+  };
+}
+
 function abilityIdOf(event) {
   return event.abilityGameID ?? event.ability?.gameID ?? event.ability?.guid ?? null;
 }
 
 function abilityNameOf(event, abilityById) {
   const abilityId = abilityIdOf(event);
-  return abilityById?.get(abilityId) || ABILITY_NAMES[abilityId] || event.ability?.name || `Ability ${abilityId}`;
+  return abilityById?.get(abilityId)?.name || ABILITY_NAMES[abilityId] || event.ability?.name || `Ability ${abilityId}`;
 }
 
 function msFromPull(fight, timestamp) {
@@ -429,12 +478,14 @@ function evidenceForDamageEvent({ event, fight, actorById, feather }) {
   };
 }
 
-function buildFindings({ fight, actorById, damageEvents, featherTimeline }) {
+function buildFindings({ fight, actorById, specByActor, damageEvents, featherTimeline }) {
   const findings = [];
   const mistakes = [];
   const contributions = [];
   const wipeFailureGroups = new Map();
   const flameMistakeGroups = { active: new Map(), items: [] };
+  const ruptureMistakeGroups = { active: new Map(), items: [] };
+  const frontalGroups = new Map();
 
   for (const event of damageEvents.sort((a, b) => a.timestamp - b.timestamp)) {
     const abilityId = abilityIdOf(event);
@@ -442,6 +493,52 @@ function buildFindings({ fight, actorById, damageEvents, featherTimeline }) {
 
     if (wipeRule) {
       addWipeFailureEvent(wipeFailureGroups, { event, fight, actorById, abilityId, wipeRule });
+      continue;
+    }
+
+    const frontalRule = FRONTAL_RULES[abilityId];
+    if (frontalRule && event.targetID) {
+      addFrontalEvent(frontalGroups, {
+        event,
+        fight,
+        actorById,
+        specByActor,
+        featherTimeline,
+        abilityId,
+        frontalRule,
+      });
+      continue;
+    }
+
+    if (abilityId === SPELLS.voidlightRupture && event.targetID) {
+      const feather = featherTimeline.getAt(event.targetID, event.timestamp);
+      const evidence = evidenceForDamageEvent({ event, fight, actorById, feather });
+      const base = {
+        timestamp: event.timestamp,
+        time: formatTime(msFromPull(fight, event.timestamp)),
+        player: playerMeta(actorById, specByActor, event.targetID),
+        mechanic: "Radiant Echoes",
+        abilityId,
+        abilityName: evidence.abilityName,
+        mechanicColor: "immune",
+        expectedFeather: "opposite",
+        actualFeather: feather.state,
+        damageAmount: event.amount ?? 0,
+        evidence: [evidence],
+      };
+
+      if ((event.amount ?? 0) <= 0) {
+        contributions.push({
+          id: `contribution-${abilityId}-${event.timestamp}-${event.targetID}`,
+          category: "contribution",
+          severity: "info",
+          label: "immune orb soak",
+          ...base,
+        });
+        continue;
+      }
+
+      addRuptureMistakeEvent(ruptureMistakeGroups, { event, abilityId, base, evidence });
       continue;
     }
 
@@ -453,7 +550,7 @@ function buildFindings({ fight, actorById, damageEvents, featherTimeline }) {
     const base = {
       timestamp: event.timestamp,
       time: formatTime(msFromPull(fight, event.timestamp)),
-      player: actorMeta(actorById, event.targetID),
+      player: playerMeta(actorById, specByActor, event.targetID),
       mechanic: colorRule.mechanic,
       abilityId,
       abilityName: evidence.abilityName,
@@ -514,6 +611,22 @@ function buildFindings({ fight, actorById, damageEvents, featherTimeline }) {
   for (const mistake of flameMistakeGroups.items.map(finalizeFlameMistakeGroup)) {
     findings.push(mistake);
     mistakes.push(mistake);
+  }
+
+  for (const mistake of ruptureMistakeGroups.items.map(finalizeRuptureMistakeGroup)) {
+    findings.push(mistake);
+    mistakes.push(mistake);
+  }
+
+  for (const finding of [...frontalGroups.values()].map(finalizeFrontalGroup)) {
+    if (finding.wipeFailure) {
+      findings.push(finding.wipeFailure);
+      mistakes.push(finding.wipeFailure);
+    }
+    if (finding.mistake) {
+      findings.push(finding.mistake);
+      mistakes.push(finding.mistake);
+    }
   }
 
   findings.sort((a, b) => a.timestamp - b.timestamp);
@@ -614,6 +727,131 @@ function finalizeFlameMistakeGroup(group) {
   return group;
 }
 
+function addRuptureMistakeEvent(groups, { event, abilityId, base, evidence }) {
+  const groupKey = `${event.targetID}:${abilityId}`;
+  const existing = groups.active.get(groupKey);
+
+  if (existing && event.timestamp - existing.lastTimestamp <= 5000) {
+    existing.lastTimestamp = event.timestamp;
+    existing.tickCount += 1;
+    existing.damageAmount += event.amount ?? 0;
+    existing.evidence.push(evidence);
+    return;
+  }
+
+  const next = {
+    id: `mistake-${abilityId}-${event.timestamp}-${event.targetID}`,
+    category: "likely_mistake",
+    severity: "high",
+    label: "wrong orb",
+    outcome: "took Voidlight Rupture damage",
+    attribution: "target_player",
+    deathLinkedLabel: "wrong orb",
+    ...base,
+    tickCount: 1,
+    firstTimestamp: event.timestamp,
+    lastTimestamp: event.timestamp,
+    evidence: [evidence],
+  };
+  groups.items.push(next);
+  groups.active.set(groupKey, next);
+}
+
+function finalizeRuptureMistakeGroup(group) {
+  group.evidence = group.evidence.slice(0, 8);
+  group.damageAmount = Math.round(group.damageAmount);
+  group.tickCount = group.tickCount || group.evidence.length;
+  return group;
+}
+
+function addFrontalEvent(groups, { event, fight, actorById, specByActor, featherTimeline, abilityId, frontalRule }) {
+  const feather = featherTimeline.getAt(event.targetID, event.timestamp);
+  if (feather.state === "unknown") return;
+
+  const player = playerMeta(actorById, specByActor, event.targetID);
+  const isTank = player.role === "tank";
+  const wrongColor = feather.state !== frontalRule.expectedFeather;
+  const shouldCreateMistake = !isTank;
+  const shouldCreateWipeFailure = wrongColor;
+  if (!shouldCreateMistake && !shouldCreateWipeFailure) return;
+
+  const groupKey = `${event.targetID}:${frontalRule.color}:${Math.floor(event.timestamp / 1000)}`;
+  const evidence = evidenceForDamageEvent({ event, fight, actorById, feather });
+  const group =
+    groups.get(groupKey) ||
+    {
+      id: `frontal-${event.targetID}-${frontalRule.color}-${Math.floor(event.timestamp / 1000)}`,
+      timestamp: event.timestamp,
+      time: formatTime(msFromPull(fight, event.timestamp)),
+      player,
+      mechanic: frontalRule.mechanic,
+      abilityId,
+      abilityName: evidence.abilityName,
+      mechanicColor: frontalRule.color,
+      expectedFeather: frontalRule.expectedFeather,
+      actualFeather: feather.state,
+      damageAmount: 0,
+      evidence: [],
+      shouldCreateMistake,
+      shouldCreateWipeFailure,
+      wrongColor,
+      isTank,
+    };
+
+  group.timestamp = Math.min(group.timestamp, event.timestamp);
+  group.time = formatTime(msFromPull(fight, group.timestamp));
+  group.damageAmount += event.amount || 0;
+  group.evidence.push(evidence);
+  group.shouldCreateMistake ||= shouldCreateMistake;
+  group.shouldCreateWipeFailure ||= shouldCreateWipeFailure;
+  groups.set(groupKey, group);
+}
+
+function finalizeFrontalGroup(group) {
+  const evidence = group.evidence.slice(0, 8);
+  const base = {
+    timestamp: group.timestamp,
+    time: group.time,
+    player: group.player,
+    mechanic: group.mechanic,
+    abilityId: group.abilityId,
+    abilityName: group.abilityName,
+    mechanicColor: group.mechanicColor,
+    expectedFeather: group.expectedFeather,
+    actualFeather: group.actualFeather,
+    damageAmount: Math.round(group.damageAmount),
+    evidence,
+  };
+
+  return {
+    wipeFailure: group.shouldCreateWipeFailure
+      ? {
+          id: `${group.id}-wipe`,
+          category: "wipe_level_failure",
+          severity: "wipe",
+          label: group.player.role === "tank" ? `${group.player.name} wrong frontal color` : "wrong frontal color",
+          attribution: group.player.role === "tank" ? "tank_player_unclear" : "target_player",
+          players: [group.player],
+          hitCount: group.evidence.length,
+          raidDamageTotal: Math.round(group.damageAmount),
+          ...base,
+        }
+      : null,
+    mistake: group.shouldCreateMistake
+      ? {
+          id: `${group.id}-mistake`,
+          category: "likely_mistake",
+          severity: "high",
+          label: group.wrongColor ? "wrong frontal color" : "stood in frontal",
+          outcome: group.wrongColor ? "boss enrage" : "avoidable frontal hit",
+          attribution: "target_player",
+          deathLinkedLabel: group.wrongColor ? "wrong frontal color" : "stood in frontal",
+          ...base,
+        }
+      : null,
+  };
+}
+
 function buildDeaths({ fight, actorById, deaths, damageEvents, mistakes }) {
   return deaths
     .slice()
@@ -692,6 +930,7 @@ function buildEchoLeaderboard({ actorById, contributions, mistakes, deaths }) {
         totalCorrectSoaks: 0,
         lightSoaks: 0,
         voidSoaks: 0,
+        immunitySoaks: 0,
         wrongColorSoaks: 0,
       });
     }
@@ -704,6 +943,7 @@ function buildEchoLeaderboard({ actorById, contributions, mistakes, deaths }) {
     row.totalCorrectSoaks += 1;
     if (contribution.mechanicColor === "light") row.lightSoaks += 1;
     if (contribution.mechanicColor === "void") row.voidSoaks += 1;
+    if (contribution.mechanicColor === "immune") row.immunitySoaks += 1;
   }
 
   for (const mistake of mistakes.filter((item) => item.mechanic === "Radiant Echoes" && item.category === "likely_mistake")) {
@@ -732,6 +972,61 @@ function buildEchoLeaderboard({ actorById, contributions, mistakes, deaths }) {
           : null,
       player: actorMeta(actorById, row.player.id),
     }));
+}
+
+function buildQuillLeaderboard({ actorById, damageEvents, featherTimeline }) {
+  const rows = new Map();
+  const groups = new Map();
+
+  for (const event of damageEvents) {
+    const abilityId = abilityIdOf(event);
+    const colorRule = COLOR_DAMAGE_RULES[abilityId];
+    if (!colorRule || colorRule.mechanic !== "Infused Quills" || !event.targetID) continue;
+
+    const key = `${abilityId}:${Math.floor(event.timestamp / 250)}`;
+    const group = groups.get(key) || {
+      abilityId,
+      color: colorRule.color,
+      expectedFeather: colorRule.expectedFeather,
+      events: [],
+    };
+    group.events.push(event);
+    groups.set(key, group);
+  }
+
+  function rowFor(playerId) {
+    if (!rows.has(playerId)) {
+      rows.set(playerId, {
+        player: actorMeta(actorById, playerId),
+        totalCorrectQuills: 0,
+        lightQuills: 0,
+        voidQuills: 0,
+        multiHitQuills: 0,
+      });
+    }
+    return rows.get(playerId);
+  }
+
+  for (const group of groups.values()) {
+    const targets = new Set(group.events.map((event) => event.targetID));
+    if (targets.size !== 1) {
+      for (const targetID of targets) rowFor(targetID).multiHitQuills += 1;
+      continue;
+    }
+
+    const event = group.events[0];
+    const feather = featherTimeline.getAt(event.targetID, event.timestamp);
+    if (feather.state !== group.expectedFeather) continue;
+
+    const row = rowFor(event.targetID);
+    row.totalCorrectQuills += 1;
+    if (group.color === "light") row.lightQuills += 1;
+    if (group.color === "void") row.voidQuills += 1;
+  }
+
+  return [...rows.values()].sort(
+    (a, b) => b.totalCorrectQuills - a.totalCorrectQuills || a.player.name.localeCompare(b.player.name),
+  );
 }
 
 function buildEruptionInterruptLeaderboard({ actorById, interrupts }) {
@@ -819,6 +1114,52 @@ function rowsByFight(events) {
   return grouped;
 }
 
+function buildSpecByActor(combatantInfoEvents) {
+  const specs = new Map();
+  for (const event of combatantInfoEvents) {
+    if (event.sourceID && event.specID) specs.set(event.sourceID, event.specID);
+  }
+  return specs;
+}
+
+function buildSpellMap(abilityById) {
+  const ids = new Set([
+    ...Object.values(SPELLS),
+    ...abilityById.keys(),
+  ]);
+  return Object.fromEntries(
+    [...ids]
+      .filter(Boolean)
+      .map((id) => {
+        const ability = abilityById.get(id);
+        return [
+          id,
+          {
+            id,
+            name: ability?.name || ABILITY_NAMES[id] || `Ability ${id}`,
+            icon: ability?.icon || null,
+          },
+        ];
+      }),
+  );
+}
+
+function reportTimestamp(report, fightTime) {
+  return report.startTime + fightTime;
+}
+
+function liveLogStatus(report, pulls) {
+  const latestPull = pulls.slice().sort((a, b) => b.id - a.id)[0] || null;
+  if (!latestPull) return { isLive: false, latestPullEndedAt: null, ageMs: null };
+  const latestPullEndedAt = reportTimestamp(report, latestPull.endTime);
+  const ageMs = Date.now() - latestPullEndedAt;
+  return {
+    isLive: ageMs >= 0 && ageMs <= 30 * 60 * 1000,
+    latestPullEndedAt,
+    ageMs,
+  };
+}
+
 function mergeEchoLeaderboards(actorById, leaderboards) {
   const rows = new Map();
   for (const leaderboard of leaderboards) {
@@ -831,12 +1172,14 @@ function mergeEchoLeaderboards(actorById, leaderboards) {
           totalCorrectSoaks: 0,
           lightSoaks: 0,
           voidSoaks: 0,
+          immunitySoaks: 0,
           wrongColorSoaks: 0,
           deathsFromSoaks: 0,
         };
       row.totalCorrectSoaks += item.totalCorrectSoaks;
       row.lightSoaks += item.lightSoaks;
       row.voidSoaks += item.voidSoaks;
+      row.immunitySoaks += item.immunitySoaks || 0;
       row.wrongColorSoaks += item.wrongColorSoaks;
       row.deathsFromSoaks += item.deathsFromSoaks;
       rows.set(id, row);
@@ -852,6 +1195,33 @@ function mergeEchoLeaderboards(actorById, leaderboards) {
           ? Number(((row.totalCorrectSoaks - row.deathsFromSoaks) / row.totalCorrectSoaks).toFixed(3))
           : null,
     }));
+}
+
+function mergeQuillLeaderboards(actorById, leaderboards) {
+  const rows = new Map();
+  for (const leaderboard of leaderboards) {
+    for (const item of leaderboard) {
+      const id = item.player.id;
+      const row =
+        rows.get(id) ||
+        {
+          player: actorMeta(actorById, id),
+          totalCorrectQuills: 0,
+          lightQuills: 0,
+          voidQuills: 0,
+          multiHitQuills: 0,
+        };
+      row.totalCorrectQuills += item.totalCorrectQuills;
+      row.lightQuills += item.lightQuills;
+      row.voidQuills += item.voidQuills;
+      row.multiHitQuills += item.multiHitQuills;
+      rows.set(id, row);
+    }
+  }
+
+  return [...rows.values()].sort(
+    (a, b) => b.totalCorrectQuills - a.totalCorrectQuills || a.player.name.localeCompare(b.player.name),
+  );
 }
 
 function mergeInterruptLeaderboards(actorById, leaderboards) {
@@ -968,6 +1338,7 @@ function buildSummary({ mistakes, deaths, wipeFailures, echoLeaderboard }) {
       totalCorrectSoaks: row.totalCorrectSoaks,
       lightSoaks: row.lightSoaks,
       voidSoaks: row.voidSoaks,
+      immunitySoaks: row.immunitySoaks || 0,
       wrongColorSoaks: row.wrongColorSoaks,
     })),
   };
@@ -986,7 +1357,7 @@ export async function analyzeBeloren(reportUrl = REPORT_URL, options = {}) {
         : fightId;
   const fight = pickFight(report, selectedFightId);
   const actorById = new Map(report.masterData.actors.map((actor) => [actor.id, actor]));
-  const abilityById = new Map((report.masterData.abilities || []).map((ability) => [ability.gameID, ability.name]));
+  const abilityById = new Map((report.masterData.abilities || []).map((ability) => [ability.gameID, ability]));
   const belorenFights = report.fights
     .filter((item) => item.encounterID === BELOREN_ENCOUNTER_ID)
     .sort((a, b) => a.id - b.id);
@@ -996,15 +1367,16 @@ export async function analyzeBeloren(reportUrl = REPORT_URL, options = {}) {
   const scope = options.scope === "night" ? "night" : "pull";
 
   async function fetchEventBundle({ fightIds, startTime, endTime }) {
-    const [debuffs, damageTaken, deaths, casts, interrupts, healing] = await Promise.all([
+    const [debuffs, damageTaken, deaths, casts, interrupts, healing, combatantInfo] = await Promise.all([
       fetchAllEvents(token, { code: reportCode, fightIds, dataType: "Debuffs", startTime, endTime }),
       fetchAllEvents(token, { code: reportCode, fightIds, dataType: "DamageTaken", startTime, endTime }),
       fetchAllEvents(token, { code: reportCode, fightIds, dataType: "Deaths", startTime, endTime }),
       fetchAllEvents(token, { code: reportCode, fightIds, dataType: "Casts", startTime, endTime }),
       fetchAllEvents(token, { code: reportCode, fightIds, dataType: "Interrupts", startTime, endTime }),
       fetchAllEvents(token, { code: reportCode, fightIds, dataType: "Healing", startTime, endTime }),
+      fetchAllEvents(token, { code: reportCode, fightIds, dataType: "CombatantInfo", startTime, endTime }),
     ]);
-    return { debuffs, damageTaken, deaths, casts, interrupts, healing };
+    return { debuffs, damageTaken, deaths, casts, interrupts, healing, combatantInfo };
   }
 
   function analyzeFight(item, bundle) {
@@ -1014,22 +1386,27 @@ export async function analyzeBeloren(reportUrl = REPORT_URL, options = {}) {
     const castsByFight = rowsByFight(bundle.casts);
     const interruptsByFight = rowsByFight(bundle.interrupts);
     const healingByFight = rowsByFight(bundle.healing);
+    const combatantInfoByFight = rowsByFight(bundle.combatantInfo);
     const debuffs = debuffsByFight.get(item.id) || [];
     const damageTaken = damageTakenByFight.get(item.id) || [];
     const deaths = deathsByFight.get(item.id) || [];
     const casts = castsByFight.get(item.id) || [];
     const interrupts = interruptsByFight.get(item.id) || [];
     const healing = healingByFight.get(item.id) || [];
+    const combatantInfo = combatantInfoByFight.get(item.id) || [];
+    const specByActor = buildSpecByActor(combatantInfo);
     const featherTimeline = buildFeatherTimeline(debuffs);
     const { findings, mistakes, contributions } = buildFindings({
       fight: item,
       actorById,
+      specByActor,
       damageEvents: damageTaken,
       featherTimeline,
     });
     const deathRecords = buildDeaths({ fight: item, actorById, deaths, damageEvents: damageTaken, mistakes });
     const wipeFailures = findings.filter((finding) => finding.category === "wipe_level_failure");
     const echoLeaderboard = buildEchoLeaderboard({ actorById, contributions, mistakes, deaths: deathRecords });
+    const quillLeaderboard = buildQuillLeaderboard({ actorById, damageEvents: damageTaken, featherTimeline });
     const eruptionInterruptLeaderboard = buildEruptionInterruptLeaderboard({ actorById, interrupts });
     const consumableLeaderboard = buildConsumableLeaderboard({ actorById, abilityById, healingEvents: healing });
 
@@ -1041,6 +1418,7 @@ export async function analyzeBeloren(reportUrl = REPORT_URL, options = {}) {
       casts,
       interrupts,
       healing,
+      combatantInfo,
       featherTimeline,
       findings,
       mistakes,
@@ -1048,6 +1426,7 @@ export async function analyzeBeloren(reportUrl = REPORT_URL, options = {}) {
       deathRecords,
       wipeFailures,
       echoLeaderboard,
+      quillLeaderboard,
       eruptionInterruptLeaderboard,
       consumableLeaderboard,
     };
@@ -1067,7 +1446,9 @@ export async function analyzeBeloren(reportUrl = REPORT_URL, options = {}) {
           bossPercentage: item.bossPercentage,
           duration: formatTime(item.endTime - item.startTime),
         })),
+      liveLog: liveLogStatus(report, belorenFights),
     },
+    spells: buildSpellMap(abilityById),
     fight: {
       id: fight.id,
       name: fight.name,
@@ -1106,6 +1487,7 @@ export async function analyzeBeloren(reportUrl = REPORT_URL, options = {}) {
       casts: selectedAnalysis.casts.length,
       interrupts: selectedAnalysis.interrupts.length,
       healing: selectedAnalysis.healing.length,
+      combatantInfo: selectedAnalysis.combatantInfo.length,
     };
     output.featherTimeline = {
       playerCount: featherTimeline.playerCount,
@@ -1120,6 +1502,7 @@ export async function analyzeBeloren(reportUrl = REPORT_URL, options = {}) {
         .sort((a, b) => severityRank(b.severity) - severityRank(a.severity) || a.timestamp - b.timestamp)
         .slice(0, 100),
       correctEchoSoakLeaderboard: echoLeaderboard,
+      correctQuillSoakLeaderboard: selectedAnalysis.quillLeaderboard,
       eruptionInterruptLeaderboard,
       consumableLeaderboard,
     };
@@ -1140,6 +1523,7 @@ export async function analyzeBeloren(reportUrl = REPORT_URL, options = {}) {
       nightCasts: nightBundle.casts.length,
       nightInterrupts: nightBundle.interrupts.length,
       nightHealing: nightBundle.healing.length,
+      nightCombatantInfo: nightBundle.combatantInfo.length,
     };
     output.wholeNight = {
       pullCount: analyses.length,
@@ -1148,6 +1532,10 @@ export async function analyzeBeloren(reportUrl = REPORT_URL, options = {}) {
       correctEchoSoakLeaderboard: mergeEchoLeaderboards(
         actorById,
         analyses.map((item) => item.echoLeaderboard),
+      ),
+      correctQuillSoakLeaderboard: mergeQuillLeaderboards(
+        actorById,
+        analyses.map((item) => item.quillLeaderboard),
       ),
       eruptionInterruptLeaderboard: mergeInterruptLeaderboards(
         actorById,
@@ -1197,6 +1585,7 @@ export function compactOutput(output) {
       totalCorrectSoaks: row.totalCorrectSoaks,
       lightSoaks: row.lightSoaks,
       voidSoaks: row.voidSoaks,
+      immunitySoaks: row.immunitySoaks || 0,
       wrongColorSoaks: row.wrongColorSoaks,
       deathsFromSoaks: row.deathsFromSoaks,
       survivalRate: row.survivalRate,
