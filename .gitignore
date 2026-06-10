@@ -1,4 +1,5 @@
 .env
+.data-cache/
 app/*.log
 wcl-beloren-spike.mjs
 inspect-wcl.mjs

@@ -6,32 +6,51 @@ const statusTextEl = document.querySelector("#status-text");
 const dashboardEl = document.querySelector("#dashboard");
 const pullCache = new Map();
 const nightCache = new Map();
+const allProgCache = new Map();
 let currentPullData = null;
 let spellMap = {};
 let livePollTimer = null;
 let latestKnownFightId = null;
 let activeTab = "latest";
+let ignoreImmunitySoaks = false;
+let liveScanStartedAt = null;
+let liveScanTimedOut = false;
+const ALL_PROG_GUILD_ID = 811453;
+const LAST_REPORT_URL_KEY = "beloren-dashboard:last-report-url";
+const LIVE_SCAN_INTERVAL_MS = 30000;
+const LIVE_SCAN_TIMEOUT_MS = 3 * 60 * 60 * 1000;
 
 const els = {
   summaryGrid: document.querySelector("#summary-grid"),
   nightSummaryGrid: document.querySelector("#night-summary-grid"),
+  allProgSummaryGrid: document.querySelector("#all-prog-summary-grid"),
   wipeFailures: document.querySelector("#wipe-failures"),
   deaths: document.querySelector("#deaths"),
   mistakes: document.querySelector("#mistakes"),
   echoSoaks: document.querySelector("#echo-soaks"),
   quillSoaks: document.querySelector("#quill-soaks"),
   eruptionInterrupts: document.querySelector("#eruption-interrupts"),
+  eggDamage: document.querySelector("#egg-damage"),
   consumables: document.querySelector("#consumables"),
   nightMistakes: document.querySelector("#night-mistakes"),
   nightEchoSoaks: document.querySelector("#night-echo-soaks"),
   nightQuillSoaks: document.querySelector("#night-quill-soaks"),
   nightEruptionInterrupts: document.querySelector("#night-eruption-interrupts"),
+  nightEggDamage: document.querySelector("#night-egg-damage"),
   nightConsumables: document.querySelector("#night-consumables"),
+  allProgMistakes: document.querySelector("#all-prog-mistakes"),
+  allProgEchoSoaks: document.querySelector("#all-prog-echo-soaks"),
+  allProgQuillSoaks: document.querySelector("#all-prog-quill-soaks"),
+  allProgEruptionInterrupts: document.querySelector("#all-prog-eruption-interrupts"),
+  allProgEggDamage: document.querySelector("#all-prog-egg-damage"),
+  allProgConsumables: document.querySelector("#all-prog-consumables"),
   liveLogControl: document.querySelector("#live-log-control"),
   liveScanToggle: document.querySelector("#live-scan-toggle"),
   liveLogLabel: document.querySelector("#live-log-label"),
+  forceScanButton: document.querySelector("#force-scan-button"),
   reportLink: document.querySelector("#report-link"),
   statusTabs: document.querySelector("#status-tabs"),
+  allProgTabButton: document.querySelector("#all-prog-tab-button"),
   dashboardControls: document.querySelector(".dashboard-controls"),
   wipeCount: document.querySelector("#wipe-count"),
   deathCount: document.querySelector("#death-count"),
@@ -39,13 +58,25 @@ const els = {
   soakCount: document.querySelector("#soak-count"),
   quillCount: document.querySelector("#quill-count"),
   interruptCount: document.querySelector("#interrupt-count"),
+  eggDamageCount: document.querySelector("#egg-damage-count"),
   consumableCount: document.querySelector("#consumable-count"),
   nightMistakeCount: document.querySelector("#night-mistake-count"),
   nightSoakCount: document.querySelector("#night-soak-count"),
   nightQuillCount: document.querySelector("#night-quill-count"),
   nightInterruptCount: document.querySelector("#night-interrupt-count"),
+  nightEggDamageCount: document.querySelector("#night-egg-damage-count"),
   nightConsumableCount: document.querySelector("#night-consumable-count"),
+  allProgMistakeCount: document.querySelector("#all-prog-mistake-count"),
+  allProgSoakCount: document.querySelector("#all-prog-soak-count"),
+  allProgQuillCount: document.querySelector("#all-prog-quill-count"),
+  allProgInterruptCount: document.querySelector("#all-prog-interrupt-count"),
+  allProgEggDamageCount: document.querySelector("#all-prog-egg-damage-count"),
+  allProgConsumableCount: document.querySelector("#all-prog-consumable-count"),
 };
+
+const lastReportUrl = localStorage.getItem(LAST_REPORT_URL_KEY);
+if (lastReportUrl) reportUrlInput.value = lastReportUrl;
+setStatus(lastReportUrl ? "Ready." : "Paste a Warcraft Logs report URL to start.");
 
 document.querySelectorAll(".tab").forEach((button) => {
   button.addEventListener("click", async () => {
@@ -53,6 +84,8 @@ document.querySelectorAll(".tab").forEach((button) => {
 
     if (button.dataset.tab === "night") {
       await loadWholeNight(reportUrlInput.value.trim());
+    } else if (button.dataset.tab === "all-prog") {
+      await loadAllProg(reportUrlInput.value.trim());
     }
   });
 });
@@ -61,7 +94,9 @@ form.addEventListener("submit", async (event) => {
   event.preventDefault();
   pullSelect.value = "latest";
   setActiveTab("latest");
-  await analyze(reportUrlInput.value.trim(), "latest");
+  const reportUrl = reportUrlInput.value.trim();
+  if (reportUrl) localStorage.setItem(LAST_REPORT_URL_KEY, reportUrl);
+  await analyze(reportUrl, "latest");
 });
 
 pullSelect.addEventListener("change", async () => {
@@ -70,12 +105,35 @@ pullSelect.addEventListener("change", async () => {
 });
 
 els.liveScanToggle.addEventListener("change", () => {
+  if (els.liveScanToggle.checked) {
+    liveScanStartedAt = Date.now();
+    liveScanTimedOut = false;
+  } else {
+    liveScanStartedAt = null;
+    liveScanTimedOut = false;
+  }
   updateScanLabel();
   updateLivePolling();
 });
 
+els.forceScanButton.addEventListener("click", async () => {
+  await scanForNewPull({ forced: true });
+});
+
+document.querySelectorAll(".ignore-immunity-toggle").forEach((toggle) => {
+  toggle.addEventListener("change", () => {
+    ignoreImmunitySoaks = toggle.checked;
+    syncImmunityToggles();
+    renderEchoLeaderboardSections();
+  });
+});
+
 async function analyze(reportUrl, pullId = pullSelect.value || "latest") {
-  setStatus("Fetching pull events...", { loading: true });
+  if (!reportUrl) {
+    setStatus("Paste a Warcraft Logs report URL to start.");
+    return;
+  }
+  setStatus("Fetching wipe events...", { loading: true });
   const cacheKey = pullCacheKey(reportUrl, pullId);
   if (pullCache.has(cacheKey)) {
     const cached = pullCache.get(cacheKey);
@@ -137,6 +195,29 @@ async function loadWholeNight(reportUrl) {
   }
 }
 
+async function loadAllProg(reportUrl) {
+  if (!reportUrl || dashboardEl.classList.contains("is-empty") || els.allProgTabButton.classList.contains("is-hidden")) return;
+  const cacheKey = allProgCacheKey(reportUrl);
+  if (allProgCache.has(cacheKey)) {
+    const cached = allProgCache.get(cacheKey);
+    renderAllProgDashboard(cached.allProg);
+    setStatus(cached.report.title);
+    return;
+  }
+
+  setStatus("Fetching all-prog data...", { loading: true });
+
+  try {
+    const payload = await fetchAnalysis({ reportUrl, scope: "prog" });
+    spellMap = payload.spells || spellMap;
+    allProgCache.set(cacheKey, payload);
+    renderAllProgDashboard(payload.allProg);
+    setStatus(payload.report.title);
+  } catch (error) {
+    setStatus(error.message, { error: true });
+  }
+}
+
 function updateLiveState(data) {
   latestKnownFightId = Math.max(latestKnownFightId || 0, data.fight.id);
   updateScanLabel();
@@ -149,30 +230,51 @@ function updateLivePolling() {
     livePollTimer = null;
   }
 
-  if (!currentPullData || !els.liveScanToggle.checked) return;
+  if (!currentPullData || !els.liveScanToggle.checked || liveScanTimedOut) return;
 
-  livePollTimer = setInterval(scanForNewPull, 30000);
+  livePollTimer = setInterval(scanForNewPull, LIVE_SCAN_INTERVAL_MS);
 }
 
 function updateScanLabel() {
-  els.liveLogLabel.textContent = els.liveScanToggle.checked
-    ? "Scanning for new pulls every 30s"
-    : "Scan for new pulls";
+  if (liveScanTimedOut) {
+    els.liveLogLabel.textContent = "Scanning paused after 3 hours";
+    return;
+  }
+
+  els.liveLogLabel.textContent = els.liveScanToggle.checked ? "Scanning for new wipes every 30s" : "Scan for new wipes";
 }
 
-async function scanForNewPull() {
-  if (!currentPullData || pullSelect.value !== "latest" || !els.liveScanToggle.checked) return;
+async function scanForNewPull({ forced = false } = {}) {
+  if (!currentPullData) return;
+  if (!forced && !els.liveScanToggle.checked) return;
+  if (!forced && liveScanStartedAt && Date.now() - liveScanStartedAt >= LIVE_SCAN_TIMEOUT_MS) {
+    liveScanTimedOut = true;
+    els.liveScanToggle.checked = false;
+    updateScanLabel();
+    updateLivePolling();
+    setStatus("Scanning paused after 3 hours to avoid extra API calls.");
+    return;
+  }
 
   try {
     const reportUrl = reportUrlInput.value.trim();
+    setStatus(forced ? "Checking for new wipes..." : "Scanning for new wipes...", { loading: true });
     const payload = await fetchAnalysis({ reportUrl, pullId: "latest", scope: "pull", fresh: true });
     if (payload.fight.id > (latestKnownFightId || 0)) {
       pullCache.set(pullCacheKey(reportUrl, "latest"), payload);
       pullCache.set(pullCacheKey(reportUrl, payload.fight.id), payload);
-      renderDashboard(payload);
+      latestKnownFightId = payload.fight.id;
+      if (pullSelect.value === "latest" && activeTab === "latest") {
+        setStatus("New wipe found. Loading latest wipe...", { loading: true });
+        renderDashboard(payload);
+      } else {
+        renderPullOptions(payload.report.pulls || [], currentPullData.fight.id);
+        updateLiveState(payload);
+      }
       setStatus(payload.report.title);
     } else {
       updateLiveState(payload);
+      setStatus(forced ? "No new wipe found." : payload.report.title);
     }
   } catch (error) {
     setStatus(`Live scan failed: ${error.message}`, { error: true });
@@ -190,7 +292,7 @@ function setActiveTab(tabName) {
   document.querySelectorAll(".tab").forEach((tab) => tab.classList.toggle("is-active", tab.dataset.tab === tabName));
   document.querySelectorAll(".tab-panel").forEach((panel) => panel.classList.add("is-hidden"));
   document.querySelector(`#${tabName}-tab`).classList.remove("is-hidden");
-  els.dashboardControls.classList.toggle("is-hidden", tabName === "night");
+  els.dashboardControls.classList.toggle("is-hidden", tabName !== "latest");
 }
 
 function renderDashboard(data) {
@@ -199,6 +301,7 @@ function renderDashboard(data) {
   currentPullData = data;
   spellMap = data.spells || spellMap;
   els.reportLink.href = reportUrlForFight(data.report.code, data.fight.id);
+  updateAllProgAccess(data.report.guild);
   updateLiveState(data);
 
   renderPullOptions(data.report.pulls || [], data.fight.id);
@@ -215,19 +318,31 @@ function renderDashboard(data) {
   els.soakCount.textContent = latest.correctEchoSoakLeaderboard.length;
   els.quillCount.textContent = latest.correctQuillSoakLeaderboard.length;
   els.interruptCount.textContent = latest.eruptionInterruptLeaderboard.length;
+  els.eggDamageCount.textContent = latest.eggDamageLeaderboard.length;
   els.consumableCount.textContent = latest.consumableLeaderboard.length;
 
   els.wipeFailures.innerHTML = renderWipeFailures(latest.wipeLevelFailures);
   els.deaths.innerHTML = renderDeaths(latest.deaths, latest.wipeLevelFailures);
   els.mistakes.innerHTML = renderMistakes(latest.likelyMistakes, latest.wipeLevelFailures);
-  els.echoSoaks.innerHTML = renderEchoSoaks(latest.correctEchoSoakLeaderboard);
+  els.echoSoaks.innerHTML = renderEchoSoaks(latest.correctEchoSoakLeaderboard, { expandable: true });
   els.quillSoaks.innerHTML = renderQuillSoaks(latest.correctQuillSoakLeaderboard);
   els.eruptionInterrupts.innerHTML = renderEruptionInterrupts(latest.eruptionInterruptLeaderboard);
+  els.eggDamage.innerHTML = renderEggDamage(latest.eggDamageLeaderboard);
   els.consumables.innerHTML = renderConsumables(latest.consumableLeaderboard);
 
   const nightPayload = nightCache.get(nightCacheKey(reportUrlInput.value.trim()));
   if (nightPayload) renderNightDashboard(nightPayload.wholeNight);
   else renderNightPlaceholder();
+
+  const allProgPayload = allProgCache.get(allProgCacheKey(reportUrlInput.value.trim()));
+  if (allProgPayload) renderAllProgDashboard(allProgPayload.allProg);
+  else renderAllProgPlaceholder();
+}
+
+function updateAllProgAccess(guild) {
+  const canShow = Number(guild?.id) === ALL_PROG_GUILD_ID;
+  els.allProgTabButton.classList.toggle("is-hidden", !canShow);
+  if (!canShow && activeTab === "all-prog") setActiveTab("latest");
 }
 
 function renderNightDashboard(night) {
@@ -237,22 +352,23 @@ function renderNightDashboard(night) {
   }
 
   els.nightSummaryGrid.innerHTML = [
-    metric("Pulls", night.pullCount),
+    metric("Attempts", night.pullCount),
     metric("Wipes", night.wipeCount),
-    metric("Mistake Players", night.mistakeLeaderboard.length),
-    metric("Consumable Users", night.consumableLeaderboard.length),
+    metric("Combat", formatDurationCompact(night.combatDurationMs)),
   ].join("");
 
   els.nightMistakeCount.textContent = night.mistakeLeaderboard.length;
   els.nightSoakCount.textContent = night.correctEchoSoakLeaderboard.length;
   els.nightQuillCount.textContent = night.correctQuillSoakLeaderboard.length;
   els.nightInterruptCount.textContent = night.eruptionInterruptLeaderboard.length;
+  els.nightEggDamageCount.textContent = night.eggDamageLeaderboard.length;
   els.nightConsumableCount.textContent = night.consumableLeaderboard.length;
 
   els.nightMistakes.innerHTML = renderNightMistakes(night.mistakeLeaderboard);
   els.nightEchoSoaks.innerHTML = renderEchoSoaks(night.correctEchoSoakLeaderboard);
   els.nightQuillSoaks.innerHTML = renderQuillSoaks(night.correctQuillSoakLeaderboard);
   els.nightEruptionInterrupts.innerHTML = renderEruptionInterrupts(night.eruptionInterruptLeaderboard);
+  els.nightEggDamage.innerHTML = renderEggDamage(night.eggDamageLeaderboard);
   els.nightConsumables.innerHTML = renderConsumables(night.consumableLeaderboard);
 }
 
@@ -262,12 +378,58 @@ function renderNightPlaceholder() {
   els.nightSoakCount.textContent = 0;
   els.nightQuillCount.textContent = 0;
   els.nightInterruptCount.textContent = 0;
+  els.nightEggDamageCount.textContent = 0;
   els.nightConsumableCount.textContent = 0;
   els.nightMistakes.innerHTML = empty("Loading night-wide mistakes.");
   els.nightEchoSoaks.innerHTML = empty("Loading night-wide soaks.");
   els.nightQuillSoaks.innerHTML = empty("Loading night-wide quill soaks.");
   els.nightEruptionInterrupts.innerHTML = empty("Loading night-wide interrupts.");
+  els.nightEggDamage.innerHTML = empty("Loading night-wide egg damage.");
   els.nightConsumables.innerHTML = empty("Loading night-wide consumable usage.");
+}
+
+function renderAllProgDashboard(allProg) {
+  if (!allProg) {
+    renderAllProgPlaceholder();
+    return;
+  }
+
+  els.allProgSummaryGrid.innerHTML = [
+    metric("Reports", allProg.reportCount),
+    metric("Attempts", allProg.pullCount),
+    metric("Wipes", allProg.wipeCount),
+    metric("Combat", formatDurationCompact(allProg.combatDurationMs)),
+  ].join("");
+
+  els.allProgMistakeCount.textContent = allProg.mistakeLeaderboard.length;
+  els.allProgSoakCount.textContent = allProg.correctEchoSoakLeaderboard.length;
+  els.allProgQuillCount.textContent = allProg.correctQuillSoakLeaderboard.length;
+  els.allProgInterruptCount.textContent = allProg.eruptionInterruptLeaderboard.length;
+  els.allProgEggDamageCount.textContent = allProg.eggDamageLeaderboard.length;
+  els.allProgConsumableCount.textContent = allProg.consumableLeaderboard.length;
+
+  els.allProgMistakes.innerHTML = renderNightMistakes(allProg.mistakeLeaderboard);
+  els.allProgEchoSoaks.innerHTML = renderEchoSoaks(allProg.correctEchoSoakLeaderboard);
+  els.allProgQuillSoaks.innerHTML = renderQuillSoaks(allProg.correctQuillSoakLeaderboard);
+  els.allProgEruptionInterrupts.innerHTML = renderEruptionInterrupts(allProg.eruptionInterruptLeaderboard);
+  els.allProgEggDamage.innerHTML = renderEggDamage(allProg.eggDamageLeaderboard);
+  els.allProgConsumables.innerHTML = renderConsumables(allProg.consumableLeaderboard);
+}
+
+function renderAllProgPlaceholder() {
+  els.allProgSummaryGrid.innerHTML = "";
+  els.allProgMistakeCount.textContent = 0;
+  els.allProgSoakCount.textContent = 0;
+  els.allProgQuillCount.textContent = 0;
+  els.allProgInterruptCount.textContent = 0;
+  els.allProgEggDamageCount.textContent = 0;
+  els.allProgConsumableCount.textContent = 0;
+  els.allProgMistakes.innerHTML = empty("Loading all-prog mistakes.");
+  els.allProgEchoSoaks.innerHTML = empty("Loading all-prog soaks.");
+  els.allProgQuillSoaks.innerHTML = empty("Loading all-prog quill soaks.");
+  els.allProgEruptionInterrupts.innerHTML = empty("Loading all-prog interrupts.");
+  els.allProgEggDamage.innerHTML = empty("Loading all-prog egg damage.");
+  els.allProgConsumables.innerHTML = empty("Loading all-prog consumable usage.");
 }
 
 function renderPullOptions(pulls, selectedFightId) {
@@ -275,9 +437,9 @@ function renderPullOptions(pulls, selectedFightId) {
   pullSelect.innerHTML = [
     `<option value="latest">Latest wipe</option>`,
     ...pulls.map((pull) => {
-      const status = pull.kill ? "Kill" : "Wipe";
+      const label = pull.kill ? "Kill" : "Wipe";
       const hp = pull.kill ? "0.0%" : `${Number(pull.bossPercentage).toFixed(1)}%`;
-      return `<option value="${pull.id}">Pull ${pull.id} - ${status} - ${hp} - ${escapeHtml(pull.duration)}</option>`;
+      return `<option value="${pull.id}">${label} ${pull.wipeNumber || pull.id} - ${hp} - ${escapeHtml(pull.duration)}</option>`;
     }),
   ].join("");
 
@@ -297,12 +459,16 @@ function nightCacheKey(reportUrl) {
   return `${reportUrl}::whole-night`;
 }
 
+function allProgCacheKey(reportUrl) {
+  return `${reportUrl}::all-prog`;
+}
+
 function metric(label, value) {
   return `<div class="metric"><span class="metric-label">${escapeHtml(label)}</span><span class="metric-value">${escapeHtml(value)}</span></div>`;
 }
 
 function renderWipeFailures(rows) {
-  if (!rows.length) return empty("No wipe-level failures detected for this pull.");
+  if (!rows.length) return empty("No wipe-level failures detected for this wipe.");
   return table(
     ["Time", "Mechanic", "Flag", "Severity", "Evidence"],
     rows.map((row) => [
@@ -390,18 +556,88 @@ function renderMistakeWipeFailure(row) {
   </div>`;
 }
 
-function renderEchoSoaks(rows) {
+function syncImmunityToggles() {
+  document.querySelectorAll(".ignore-immunity-toggle").forEach((toggle) => {
+    toggle.checked = ignoreImmunitySoaks;
+  });
+}
+
+function renderEchoLeaderboardSections() {
+  if (currentPullData?.latestWipe) {
+    els.echoSoaks.innerHTML = renderEchoSoaks(currentPullData.latestWipe.correctEchoSoakLeaderboard, { expandable: true });
+  }
+
+  const nightPayload = nightCache.get(nightCacheKey(reportUrlInput.value.trim()));
+  if (nightPayload?.wholeNight) {
+    els.nightEchoSoaks.innerHTML = renderEchoSoaks(nightPayload.wholeNight.correctEchoSoakLeaderboard);
+  }
+
+  const allProgPayload = allProgCache.get(allProgCacheKey(reportUrlInput.value.trim()));
+  if (allProgPayload?.allProg) {
+    els.allProgEchoSoaks.innerHTML = renderEchoSoaks(allProgPayload.allProg.correctEchoSoakLeaderboard);
+  }
+}
+
+function renderEchoSoaks(rows, { expandable = false } = {}) {
   if (!rows.length) return empty("No correct Radiant Echoes soaks detected.");
+  const rankedRows = rows
+    .map((row) => ({
+      ...row,
+      rankedCorrectSoaks: Math.max(0, row.totalCorrectSoaks - (ignoreImmunitySoaks ? row.immunitySoaks || 0 : 0)),
+    }))
+    .sort((a, b) => b.rankedCorrectSoaks - a.rankedCorrectSoaks || a.player.name.localeCompare(b.player.name));
+
+  if (expandable) {
+    return expandableEchoBars(rankedRows);
+  }
+
   return leaderboardBars(
-    rows,
-    "totalCorrectSoaks",
-    (row) => [
-      `Light ${formatNumber(row.lightSoaks)}`,
-      `Void ${formatNumber(row.voidSoaks)}`,
-      `Immune ${formatNumber(row.immunitySoaks)}`,
-      `Wrong ${formatNumber(row.wrongColorSoaks)}`,
-    ],
+    rankedRows,
+    "rankedCorrectSoaks",
+    echoDetails,
   );
+}
+
+function expandableEchoBars(rows) {
+  const max = Math.max(...rows.map((row) => Number(row.rankedCorrectSoaks || 0)), 1);
+  return `<div class="bar-list expandable-bar-list">${rows.map((row) => expandableEchoRow(row, max)).join("")}</div>`;
+}
+
+function expandableEchoRow(row, max) {
+  const value = Number(row.rankedCorrectSoaks || 0);
+  const width = value > 0 ? Math.max(4, Math.round((value / max) * 100)) : 0;
+  const instances = [...(row.instances || [])].sort((a, b) => a.timestamp - b.timestamp);
+
+  return `<details class="bar-row-detail">
+    <summary class="bar-row bar-row-summary">
+      <span class="bar-player">${player(row.player)}</span>
+      <span class="bar-visual"><span class="bar-track"><span class="bar-fill ${classColorClass(row.player.class)}" style="width:${width}%"></span></span></span>
+      <span class="bar-value">${formatNumber(value)}</span>
+      <span class="bar-details">${echoDetails(row).map(escapeHtml).join(" | ")}</span>
+    </summary>
+    <div class="echo-instance-list">
+      ${instances.length ? instances.map(renderEchoInstance).join("") : `<span class="empty-inline">No timestamped soaks.</span>`}
+    </div>
+  </details>`;
+}
+
+function renderEchoInstance(instance) {
+  const label = instance.type === "immune" ? "Immune" : instance.type === "light" ? "Light" : "Void";
+  return `<span class="echo-instance">
+    <strong>${escapeHtml(instance.time)}</strong>
+    <span>${escapeHtml(label)}</span>
+    <span>${spell(instance.abilityId, instance.abilityName)}</span>
+    <span class="echo-instance-amount">${formatNumber(instance.amount)}</span>
+  </span>`;
+}
+
+function echoDetails(row) {
+  return [
+    `Light ${formatNumber(row.lightSoaks)}`,
+    `Void ${formatNumber(row.voidSoaks)}`,
+    `Immune ${formatNumber(row.immunitySoaks)}`,
+    `Wrong ${formatNumber(row.wrongColorSoaks)}`,
+  ];
 }
 
 function renderQuillSoaks(rows) {
@@ -429,6 +665,15 @@ function renderEruptionInterrupts(rows) {
   );
 }
 
+function renderEggDamage(rows) {
+  if (!rows.length) return empty("No egg phase damage detected.");
+  return leaderboardBars(
+    rows,
+    "totalDamage",
+    () => [],
+  );
+}
+
 function renderConsumables(rows) {
   if (!rows.length) return empty("No healthstone or health potion usage detected.");
   return leaderboardBars(
@@ -449,7 +694,7 @@ function renderNightMistakes(rows) {
     <div class="night-mistake-header">
       <span>Player</span>
       <span>Total</span>
-      <span>Pulls</span>
+      <span>Wipes</span>
     </div>
     ${rows.map((row) => renderNightMistakeRow(row, max)).join("")}
   </div>`;
@@ -554,6 +799,13 @@ function spell(abilityId, fallbackName) {
 function formatNumber(value) {
   const number = Number(value || 0);
   return number.toLocaleString();
+}
+
+function formatDurationCompact(ms) {
+  const totalMinutes = Math.round(Number(ms || 0) / 60000);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return `${hours}:${String(minutes).padStart(2, "0")}`;
 }
 
 function escapeHtml(value) {

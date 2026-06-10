@@ -20,7 +20,7 @@
             id="report-url"
             name="reportUrl"
             type="url"
-            value="https://www.warcraftlogs.com/reports/c28N14ZFVxybzAHW?type=summary"
+            placeholder="Paste a Warcraft Logs report URL"
             aria-label="Warcraft Logs report URL"
             required
           />
@@ -36,13 +36,15 @@
         <nav id="status-tabs" class="tabs status-tabs is-hidden" aria-label="Dashboard views">
           <button class="tab is-active" type="button" data-tab="latest">Latest Wipe</button>
           <button class="tab" type="button" data-tab="night">Whole Night</button>
+          <button id="all-prog-tab-button" class="tab is-hidden" type="button" data-tab="all-prog">All Prog</button>
         </nav>
         <div id="live-log-control" class="scan-control live-log-control is-hidden">
           <label class="switch-label">
             <input id="live-scan-toggle" type="checkbox" />
             <span class="switch" aria-hidden="true"></span>
-            <span id="live-log-label">Scan for new pulls</span>
+            <span id="live-log-label">Scan for new wipes</span>
           </label>
+          <button id="force-scan-button" class="scan-now-button" type="button">Check now</button>
         </div>
       </section>
 
@@ -50,10 +52,10 @@
         <div class="summary-grid dashboard-controls">
           <div class="metric pull-metric">
             <div class="metric-line">
-              <label class="metric-label" for="pull-select">Pull</label>
+              <label class="metric-label" for="pull-select">Wipe</label>
               <a id="report-link" class="report-link" href="#" target="_blank" rel="noreferrer">Open log</a>
             </div>
-            <select id="pull-select" name="pullId" aria-label="Pull to analyze" disabled>
+            <select id="pull-select" name="pullId" aria-label="Wipe to analyze" disabled>
               <option value="latest">Latest wipe</option>
             </select>
           </div>
@@ -89,11 +91,17 @@
 
             <section class="panel">
               <header class="panel-header">
-              <h2>Correct Radiant Echoes Soaks</h2>
-              <span id="soak-count" class="count">0</span>
-            </header>
-            <div id="echo-soaks"></div>
-          </section>
+                <div>
+                  <h2>Correct Radiant Echoes Soaks</h2>
+                  <label class="mini-toggle">
+                    <input class="ignore-immunity-toggle" type="checkbox" />
+                    <span>Ignore immunities</span>
+                  </label>
+                </div>
+                <span id="soak-count" class="count">0</span>
+              </header>
+              <div id="echo-soaks"></div>
+            </section>
 
             <section class="panel">
               <header class="panel-header">
@@ -109,6 +117,14 @@
                 <span id="interrupt-count" class="count">0</span>
               </header>
               <div id="eruption-interrupts"></div>
+            </section>
+
+            <section class="panel">
+              <header class="panel-header">
+                <h2>Egg Damage</h2>
+                <span id="egg-damage-count" class="count">0</span>
+              </header>
+              <div id="egg-damage"></div>
             </section>
 
             <section class="panel">
@@ -135,7 +151,13 @@
 
             <section class="panel">
               <header class="panel-header">
-                <h2>Correct Radiant Echoes Soaks</h2>
+                <div>
+                  <h2>Correct Radiant Echoes Soaks</h2>
+                  <label class="mini-toggle">
+                    <input class="ignore-immunity-toggle" type="checkbox" />
+                    <span>Ignore immunities</span>
+                  </label>
+                </div>
                 <span id="night-soak-count" class="count">0</span>
               </header>
               <div id="night-echo-soaks"></div>
@@ -159,10 +181,78 @@
 
             <section class="panel">
               <header class="panel-header">
+                <h2>Egg Damage</h2>
+                <span id="night-egg-damage-count" class="count">0</span>
+              </header>
+              <div id="night-egg-damage"></div>
+            </section>
+
+            <section class="panel">
+              <header class="panel-header">
                 <h2>Healthstone / Potions</h2>
                 <span id="night-consumable-count" class="count">0</span>
               </header>
               <div id="night-consumables"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="all-prog-tab" class="tab-panel is-hidden">
+          <div id="all-prog-summary-grid" class="summary-grid"></div>
+
+          <div class="module-grid">
+            <section class="panel">
+              <header class="panel-header">
+                <h2>Mistakes By Player</h2>
+                <span id="all-prog-mistake-count" class="count">0</span>
+              </header>
+              <div id="all-prog-mistakes"></div>
+            </section>
+
+            <section class="panel">
+              <header class="panel-header">
+                <div>
+                  <h2>Correct Radiant Echoes Soaks</h2>
+                  <label class="mini-toggle">
+                    <input class="ignore-immunity-toggle" type="checkbox" />
+                    <span>Ignore immunities</span>
+                  </label>
+                </div>
+                <span id="all-prog-soak-count" class="count">0</span>
+              </header>
+              <div id="all-prog-echo-soaks"></div>
+            </section>
+
+            <section class="panel">
+              <header class="panel-header">
+                <h2>Correct Quill Soaks</h2>
+                <span id="all-prog-quill-count" class="count">0</span>
+              </header>
+              <div id="all-prog-quill-soaks"></div>
+            </section>
+
+            <section class="panel">
+              <header class="panel-header">
+                <h2>Eruption Interrupts</h2>
+                <span id="all-prog-interrupt-count" class="count">0</span>
+              </header>
+              <div id="all-prog-eruption-interrupts"></div>
+            </section>
+
+            <section class="panel">
+              <header class="panel-header">
+                <h2>Egg Damage</h2>
+                <span id="all-prog-egg-damage-count" class="count">0</span>
+              </header>
+              <div id="all-prog-egg-damage"></div>
+            </section>
+
+            <section class="panel">
+              <header class="panel-header">
+                <h2>Healthstone / Potions</h2>
+                <span id="all-prog-consumable-count" class="count">0</span>
+              </header>
+              <div id="all-prog-consumables"></div>
             </section>
           </div>
         </section>

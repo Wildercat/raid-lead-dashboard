@@ -6,7 +6,7 @@ loadDotEnv(join(dirname(fileURLToPath(import.meta.url)), ".env"));
 
 const REPORT_URL =
   process.argv.slice(2).find((arg) => !arg.startsWith("--")) ||
-  "https://www.warcraftlogs.com/reports/c28N14ZFVxybzAHW?fight=33&type=summary";
+  "https://www.warcraftlogs.com/reports/cpLTD4K92BnGPMmV?fight=40&type=summary";
 const SUMMARY_MODE = process.argv.includes("--summary");
 const CLIENT_ID = process.env.WARCRAFT_LOGS_CLIENT_ID;
 const CLIENT_SECRET = process.env.WARCRAFT_LOGS_CLIENT_SECRET;
@@ -189,6 +189,16 @@ query ReportShell($code: String!) {
       title
       startTime
       endTime
+      guild {
+        id
+        name
+        server {
+          name
+          region {
+            name
+          }
+        }
+      }
       fights {
         id
         encounterID
@@ -198,6 +208,11 @@ query ReportShell($code: String!) {
         startTime
         endTime
         bossPercentage
+        lastPhase
+        phaseTransitions {
+          id
+          startTime
+        }
       }
       masterData {
         abilities {
@@ -211,6 +226,7 @@ query ReportShell($code: String!) {
           type
           subType
           gameID
+          petOwner
         }
       }
     }
@@ -239,6 +255,16 @@ query ReportEvents(
         data
         nextPageTimestamp
       }
+    }
+  }
+}
+`;
+
+const DAMAGE_DONE_TABLE_QUERY = `
+query DamageDoneTable($code: String!, $fightIDs: [Int], $startTime: Float, $endTime: Float) {
+  reportData {
+    report(code: $code) {
+      table(dataType: DamageDone, fightIDs: $fightIDs, startTime: $startTime, endTime: $endTime)
     }
   }
 }
@@ -346,6 +372,62 @@ async function fetchAllEvents(token, { code, fightId, fightIds, dataType, startT
   return events;
 }
 
+async function fetchEventBundle(token, { code, fightIds, startTime, endTime }) {
+  const [debuffs, damageTaken, deaths, casts, interrupts, healing, combatantInfo] = await Promise.all([
+    fetchAllEvents(token, { code, fightIds, dataType: "Debuffs", startTime, endTime }),
+    fetchAllEvents(token, { code, fightIds, dataType: "DamageTaken", startTime, endTime }),
+    fetchAllEvents(token, { code, fightIds, dataType: "Deaths", startTime, endTime }),
+    fetchAllEvents(token, { code, fightIds, dataType: "Casts", startTime, endTime }),
+    fetchAllEvents(token, { code, fightIds, dataType: "Interrupts", startTime, endTime }),
+    fetchAllEvents(token, { code, fightIds, dataType: "Healing", startTime, endTime }),
+    fetchAllEvents(token, { code, fightIds, dataType: "CombatantInfo", startTime, endTime }),
+  ]);
+  return { debuffs, damageTaken, deaths, casts, interrupts, healing, combatantInfo };
+}
+
+async function fetchDamageDoneTable(token, { code, fightId, startTime, endTime }) {
+  const data = await graphql(token, DAMAGE_DONE_TABLE_QUERY, {
+    code,
+    fightIDs: [fightId],
+    startTime,
+    endTime,
+  });
+  return data.reportData.report.table?.data?.entries || [];
+}
+
+async function fetchPhaseDamageTables(token, { code, fights, phaseId }) {
+  const tables = {};
+
+  await Promise.all(
+    fights.map(async (fight) => {
+      const rows = new Map();
+      for (const window of phaseWindowsForFight(fight, phaseId)) {
+        const entries = await fetchDamageDoneTable(token, {
+          code,
+          fightId: fight.id,
+          startTime: window.startTime,
+          endTime: window.endTime,
+        });
+        for (const entry of entries) {
+          const row = rows.get(entry.id) || {
+            id: entry.id,
+            name: entry.name,
+            type: entry.type,
+            total: 0,
+            activeTime: 0,
+          };
+          row.total += entry.total || 0;
+          row.activeTime += entry.activeTime || 0;
+          rows.set(entry.id, row);
+        }
+      }
+      tables[fight.id] = [...rows.values()];
+    }),
+  );
+
+  return tables;
+}
+
 function pickFight(report, requestedFightId) {
   if (requestedFightId) {
     const requested = report.fights.find((fight) => fight.id === requestedFightId);
@@ -373,6 +455,27 @@ function actorMeta(actorById, id) {
     type: actor?.type || null,
     class: actor?.subType || null,
   };
+}
+
+function isPlayerActor(actor) {
+  return actor?.type === "Player";
+}
+
+function petOwnerId(actor) {
+  if (!actor?.petOwner) return null;
+  if (typeof actor.petOwner === "object") return actor.petOwner.id || null;
+  return actor.petOwner;
+}
+
+function resolvePlayerActorId(actorById, id) {
+  const actor = actorById.get(id);
+  if (!actor) return id;
+  if (isPlayerActor(actor)) return id;
+  if (actor.type === "Pet" || actor.subType === "Pet") {
+    const ownerId = petOwnerId(actor);
+    if (ownerId && isPlayerActor(actorById.get(ownerId))) return ownerId;
+  }
+  return id;
 }
 
 function actorRole(specByActor, id) {
@@ -461,6 +564,24 @@ function buildFeatherTimeline(debuffEvents) {
     segmentCount: [...segmentsByPlayer.values()].reduce((sum, segments) => sum + segments.length, 0),
     playerCount: segmentsByPlayer.size,
   };
+}
+
+function presentPlayersFromCombatantInfo(actorById, specByActor, combatantInfoEvents) {
+  const rows = new Map();
+  for (const event of combatantInfoEvents) {
+    const id = event.sourceID;
+    if (!id || !isPlayerActor(actorById.get(id))) continue;
+    rows.set(id, playerMeta(actorById, specByActor, id));
+  }
+  return [...rows.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function uniquePlayers(players) {
+  const rows = new Map();
+  for (const player of players) {
+    if (player?.id) rows.set(player.id, player);
+  }
+  return [...rows.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
 function evidenceForDamageEvent({ event, fight, actorById, feather }) {
@@ -563,12 +684,14 @@ function buildFindings({ fight, actorById, specByActor, damageEvents, featherTim
 
     if (feather.state === colorRule.expectedFeather) {
       if (colorRule.mechanic === "Radiant Echoes") {
+        const isImmuneSoak = (event.amount ?? 0) <= 0;
         contributions.push({
           id: `contribution-${abilityId}-${event.timestamp}-${event.targetID}`,
           category: "contribution",
           severity: "info",
-          label: colorRule.correctLabel,
+          label: isImmuneSoak ? "immune orb soak" : colorRule.correctLabel,
           ...base,
+          mechanicColor: isImmuneSoak ? "immune" : base.mechanicColor,
         });
       }
       continue;
@@ -829,7 +952,7 @@ function finalizeFrontalGroup(group) {
           id: `${group.id}-wipe`,
           category: "wipe_level_failure",
           severity: "wipe",
-          label: group.player.role === "tank" ? `${group.player.name} wrong frontal color` : "wrong frontal color",
+          label: "wrong frontal color",
           attribution: group.player.role === "tank" ? "tank_player_unclear" : "target_player",
           players: [group.player],
           hitCount: group.evidence.length,
@@ -919,7 +1042,7 @@ function severityRank(severity) {
   return { wipe: 100, high: 80, warning: 60, info: 10 }[severity] || 0;
 }
 
-function buildEchoLeaderboard({ actorById, contributions, mistakes, deaths }) {
+function buildEchoLeaderboard({ actorById, presentPlayers, contributions, mistakes, deaths }) {
   const rows = new Map();
 
   function rowFor(player) {
@@ -932,10 +1055,13 @@ function buildEchoLeaderboard({ actorById, contributions, mistakes, deaths }) {
         voidSoaks: 0,
         immunitySoaks: 0,
         wrongColorSoaks: 0,
+        instances: [],
       });
     }
     return rows.get(player.id);
   }
+
+  for (const player of presentPlayers) rowFor(player);
 
   for (const contribution of contributions.filter((item) => item.mechanic === "Radiant Echoes")) {
     const row = rowFor(contribution.player);
@@ -944,6 +1070,14 @@ function buildEchoLeaderboard({ actorById, contributions, mistakes, deaths }) {
     if (contribution.mechanicColor === "light") row.lightSoaks += 1;
     if (contribution.mechanicColor === "void") row.voidSoaks += 1;
     if (contribution.mechanicColor === "immune") row.immunitySoaks += 1;
+    row.instances.push({
+      timestamp: contribution.timestamp,
+      time: contribution.time,
+      abilityId: contribution.abilityId,
+      abilityName: contribution.abilityName,
+      type: contribution.mechanicColor,
+      amount: contribution.damageAmount,
+    });
   }
 
   for (const mistake of mistakes.filter((item) => item.mechanic === "Radiant Echoes" && item.category === "likely_mistake")) {
@@ -965,6 +1099,7 @@ function buildEchoLeaderboard({ actorById, contributions, mistakes, deaths }) {
     .sort((a, b) => b.totalCorrectSoaks - a.totalCorrectSoaks || a.player.name.localeCompare(b.player.name))
     .map((row) => ({
       ...row,
+      instances: row.instances.sort((a, b) => a.timestamp - b.timestamp),
       deathsFromSoaks: row.deathsFromSoaks || 0,
       survivalRate:
         row.totalCorrectSoaks > 0
@@ -974,7 +1109,7 @@ function buildEchoLeaderboard({ actorById, contributions, mistakes, deaths }) {
     }));
 }
 
-function buildQuillLeaderboard({ actorById, damageEvents, featherTimeline }) {
+function buildQuillLeaderboard({ actorById, presentPlayers, damageEvents, featherTimeline }) {
   const rows = new Map();
   const groups = new Map();
 
@@ -1007,6 +1142,8 @@ function buildQuillLeaderboard({ actorById, damageEvents, featherTimeline }) {
     return rows.get(playerId);
   }
 
+  for (const player of presentPlayers) rowFor(player.id);
+
   for (const group of groups.values()) {
     const targets = new Set(group.events.map((event) => event.targetID));
     if (targets.size !== 1) {
@@ -1029,7 +1166,7 @@ function buildQuillLeaderboard({ actorById, damageEvents, featherTimeline }) {
   );
 }
 
-function buildEruptionInterruptLeaderboard({ actorById, interrupts }) {
+function buildEruptionInterruptLeaderboard({ actorById, presentPlayers, interrupts }) {
   const rows = new Map();
 
   function rowFor(playerId) {
@@ -1044,12 +1181,14 @@ function buildEruptionInterruptLeaderboard({ actorById, interrupts }) {
     return rows.get(playerId);
   }
 
+  for (const player of presentPlayers) rowFor(player.id);
+
   for (const event of interrupts) {
     if (event.extraAbilityGameID !== SPELLS.lightEruption && event.extraAbilityGameID !== SPELLS.voidEruption) {
       continue;
     }
 
-    const row = rowFor(event.sourceID);
+    const row = rowFor(resolvePlayerActorId(actorById, event.sourceID));
     row.totalInterrupts += 1;
     if (event.extraAbilityGameID === SPELLS.lightEruption) row.lightEruptionInterrupts += 1;
     if (event.extraAbilityGameID === SPELLS.voidEruption) row.voidEruptionInterrupts += 1;
@@ -1066,7 +1205,7 @@ function consumableTypeFor(name) {
   return null;
 }
 
-function buildConsumableLeaderboard({ actorById, abilityById, healingEvents }) {
+function buildConsumableLeaderboard({ actorById, abilityById, presentPlayers, healingEvents }) {
   const rows = new Map();
 
   function rowFor(playerId) {
@@ -1082,6 +1221,8 @@ function buildConsumableLeaderboard({ actorById, abilityById, healingEvents }) {
     }
     return rows.get(playerId);
   }
+
+  for (const player of presentPlayers) rowFor(player.id);
 
   for (const event of healingEvents) {
     const abilityName = abilityNameOf(event, abilityById);
@@ -1102,6 +1243,45 @@ function buildConsumableLeaderboard({ actorById, abilityById, healingEvents }) {
       ...row,
       healing: Math.round(row.healing),
       overheal: Math.round(row.overheal),
+    }));
+}
+
+function phaseWindowsForFight(fight, phaseId) {
+  const transitions = [...(fight.phaseTransitions || [])].sort((a, b) => a.startTime - b.startTime);
+  return transitions
+    .map((transition, index) => ({
+      id: transition.id,
+      startTime: transition.startTime,
+      endTime: transitions[index + 1]?.startTime || fight.endTime,
+    }))
+    .filter((window) => window.id === phaseId && window.endTime > window.startTime);
+}
+
+function buildEggDamageLeaderboard({ actorById, presentPlayers, tableEntries }) {
+  const rows = new Map();
+
+  function rowFor(playerId) {
+    if (!rows.has(playerId)) {
+      rows.set(playerId, {
+        player: actorMeta(actorById, playerId),
+        totalDamage: 0,
+      });
+    }
+    return rows.get(playerId);
+  }
+
+  for (const player of presentPlayers) rowFor(player.id);
+
+  for (const entry of tableEntries || []) {
+    if (!rows.has(entry.id)) continue;
+    rows.get(entry.id).totalDamage += entry.total || 0;
+  }
+
+  return [...rows.values()]
+    .sort((a, b) => b.totalDamage - a.totalDamage || a.player.name.localeCompare(b.player.name))
+    .map((row) => ({
+      ...row,
+      totalDamage: Math.round(row.totalDamage),
     }));
 }
 
@@ -1278,8 +1458,38 @@ function mergeConsumableLeaderboards(actorById, leaderboards) {
   );
 }
 
-function buildMistakeLeaderboard(actorById, mistakesByFight) {
+function mergeEggDamageLeaderboards(actorById, leaderboards) {
   const rows = new Map();
+  for (const leaderboard of leaderboards) {
+    for (const item of leaderboard) {
+      const id = item.player.id;
+      const row =
+        rows.get(id) ||
+        {
+          player: actorMeta(actorById, id),
+          totalDamage: 0,
+        };
+      row.totalDamage += item.totalDamage;
+      rows.set(id, row);
+    }
+  }
+
+  return [...rows.values()].sort(
+    (a, b) => b.totalDamage - a.totalDamage || a.player.name.localeCompare(b.player.name),
+  );
+}
+
+function buildMistakeLeaderboard(actorById, presentPlayers, mistakesByFight) {
+  const rows = new Map();
+
+  for (const player of presentPlayers) {
+    rows.set(player.id, {
+      player: actorMeta(actorById, player.id),
+      totalMistakes: 0,
+      mistakeCounts: new Map(),
+      pulls: new Set(),
+    });
+  }
 
   for (const { fight, mistakes } of mistakesByFight) {
     for (const mistake of mistakes.filter((item) => item.category === "likely_mistake")) {
@@ -1344,40 +1554,83 @@ function buildSummary({ mistakes, deaths, wipeFailures, echoLeaderboard }) {
   };
 }
 
-export async function analyzeBeloren(reportUrl = REPORT_URL, options = {}) {
+export async function fetchBelorenReportShell(reportUrl = REPORT_URL) {
   const { reportCode, fightId } = parseReportUrl(reportUrl);
   const token = await getAccessToken();
   const shell = await graphql(token, REPORT_SHELL_QUERY, { code: reportCode });
-  const report = shell.reportData.report;
+  return {
+    reportUrl,
+    reportCode,
+    requestedFightId: fightId,
+    report: shell.reportData.report,
+  };
+}
+
+export async function fetchBelorenReportData(reportUrl = REPORT_URL) {
+  const shell = await fetchBelorenReportShell(reportUrl);
+  const { reportUrl: normalizedReportUrl, reportCode, requestedFightId, report } = shell;
+  const token = await getAccessToken();
+  const belorenFights = report.fights
+    .filter((item) => item.encounterID === BELOREN_ENCOUNTER_ID)
+    .sort((a, b) => a.id - b.id);
+
+  if (!belorenFights.length) {
+    throw new Error("No Beloren pulls found in the report.");
+  }
+
+  const belorenFightIds = belorenFights.map((item) => item.id);
+  const eventStartTime = Math.min(...belorenFights.map((item) => item.startTime));
+  const eventEndTime = Math.max(...belorenFights.map((item) => item.endTime));
+  const bundle = await fetchEventBundle(token, {
+    code: reportCode,
+    fightIds: belorenFightIds,
+    startTime: eventStartTime,
+    endTime: eventEndTime,
+  });
+  const phaseDamageDoneTables = await fetchPhaseDamageTables(token, {
+    code: reportCode,
+    fights: belorenFights,
+    phaseId: 2,
+  });
+
+  return {
+    reportUrl: normalizedReportUrl,
+    reportCode,
+    requestedFightId,
+    fetchedAt: new Date().toISOString(),
+    report,
+    bundle,
+    phaseDamageDoneTables,
+  };
+}
+
+export async function analyzeBeloren(reportUrl = REPORT_URL, options = {}) {
+  const data = await fetchBelorenReportData(reportUrl);
+  return analyzeBelorenData(data, { ...options, reportUrl });
+}
+
+export function analyzeBelorenData(data, options = {}) {
+  const reportUrl = options.reportUrl || data.reportUrl || `https://www.warcraftlogs.com/reports/${data.reportCode}`;
+  const { reportCode, fightId } = parseReportUrl(reportUrl);
+  const report = data.report;
   const selectedFightId =
     options.pullId === "latest"
       ? null
       : options.pullId !== undefined && options.pullId !== null && options.pullId !== ""
         ? Number(options.pullId)
-        : fightId;
+        : fightId || data.requestedFightId;
   const fight = pickFight(report, selectedFightId);
   const actorById = new Map(report.masterData.actors.map((actor) => [actor.id, actor]));
   const abilityById = new Map((report.masterData.abilities || []).map((ability) => [ability.gameID, ability]));
   const belorenFights = report.fights
     .filter((item) => item.encounterID === BELOREN_ENCOUNTER_ID)
     .sort((a, b) => a.id - b.id);
+  const belorenFightNumberById = new Map(belorenFights.map((item, index) => [item.id, index + 1]));
   const belorenFightIds = belorenFights.map((item) => item.id);
   const eventStartTime = Math.min(...belorenFights.map((item) => item.startTime));
   const eventEndTime = Math.max(...belorenFights.map((item) => item.endTime));
   const scope = options.scope === "night" ? "night" : "pull";
-
-  async function fetchEventBundle({ fightIds, startTime, endTime }) {
-    const [debuffs, damageTaken, deaths, casts, interrupts, healing, combatantInfo] = await Promise.all([
-      fetchAllEvents(token, { code: reportCode, fightIds, dataType: "Debuffs", startTime, endTime }),
-      fetchAllEvents(token, { code: reportCode, fightIds, dataType: "DamageTaken", startTime, endTime }),
-      fetchAllEvents(token, { code: reportCode, fightIds, dataType: "Deaths", startTime, endTime }),
-      fetchAllEvents(token, { code: reportCode, fightIds, dataType: "Casts", startTime, endTime }),
-      fetchAllEvents(token, { code: reportCode, fightIds, dataType: "Interrupts", startTime, endTime }),
-      fetchAllEvents(token, { code: reportCode, fightIds, dataType: "Healing", startTime, endTime }),
-      fetchAllEvents(token, { code: reportCode, fightIds, dataType: "CombatantInfo", startTime, endTime }),
-    ]);
-    return { debuffs, damageTaken, deaths, casts, interrupts, healing, combatantInfo };
-  }
+  const fullBundle = data.bundle;
 
   function analyzeFight(item, bundle) {
     const debuffsByFight = rowsByFight(bundle.debuffs);
@@ -1395,6 +1648,7 @@ export async function analyzeBeloren(reportUrl = REPORT_URL, options = {}) {
     const healing = healingByFight.get(item.id) || [];
     const combatantInfo = combatantInfoByFight.get(item.id) || [];
     const specByActor = buildSpecByActor(combatantInfo);
+    const presentPlayers = presentPlayersFromCombatantInfo(actorById, specByActor, combatantInfo);
     const featherTimeline = buildFeatherTimeline(debuffs);
     const { findings, mistakes, contributions } = buildFindings({
       fight: item,
@@ -1405,10 +1659,15 @@ export async function analyzeBeloren(reportUrl = REPORT_URL, options = {}) {
     });
     const deathRecords = buildDeaths({ fight: item, actorById, deaths, damageEvents: damageTaken, mistakes });
     const wipeFailures = findings.filter((finding) => finding.category === "wipe_level_failure");
-    const echoLeaderboard = buildEchoLeaderboard({ actorById, contributions, mistakes, deaths: deathRecords });
-    const quillLeaderboard = buildQuillLeaderboard({ actorById, damageEvents: damageTaken, featherTimeline });
-    const eruptionInterruptLeaderboard = buildEruptionInterruptLeaderboard({ actorById, interrupts });
-    const consumableLeaderboard = buildConsumableLeaderboard({ actorById, abilityById, healingEvents: healing });
+    const echoLeaderboard = buildEchoLeaderboard({ actorById, presentPlayers, contributions, mistakes, deaths: deathRecords });
+    const quillLeaderboard = buildQuillLeaderboard({ actorById, presentPlayers, damageEvents: damageTaken, featherTimeline });
+    const eruptionInterruptLeaderboard = buildEruptionInterruptLeaderboard({ actorById, presentPlayers, interrupts });
+    const consumableLeaderboard = buildConsumableLeaderboard({ actorById, abilityById, presentPlayers, healingEvents: healing });
+    const eggDamageLeaderboard = buildEggDamageLeaderboard({
+      actorById,
+      presentPlayers,
+      tableEntries: data.phaseDamageDoneTables?.[item.id] || [],
+    });
 
     return {
       fight: item,
@@ -1419,6 +1678,7 @@ export async function analyzeBeloren(reportUrl = REPORT_URL, options = {}) {
       interrupts,
       healing,
       combatantInfo,
+      presentPlayers,
       featherTimeline,
       findings,
       mistakes,
@@ -1429,6 +1689,7 @@ export async function analyzeBeloren(reportUrl = REPORT_URL, options = {}) {
       quillLeaderboard,
       eruptionInterruptLeaderboard,
       consumableLeaderboard,
+      eggDamageLeaderboard,
     };
   }
 
@@ -1436,11 +1697,13 @@ export async function analyzeBeloren(reportUrl = REPORT_URL, options = {}) {
     report: {
       code: report.code,
       title: report.title,
+      guild: report.guild || null,
       pulls: report.fights
         .filter((item) => item.encounterID === BELOREN_ENCOUNTER_ID)
         .sort((a, b) => b.id - a.id)
         .map((item) => ({
           id: item.id,
+          wipeNumber: belorenFightNumberById.get(item.id),
           name: item.name,
           kill: item.kill,
           bossPercentage: item.bossPercentage,
@@ -1451,6 +1714,7 @@ export async function analyzeBeloren(reportUrl = REPORT_URL, options = {}) {
     spells: buildSpellMap(abilityById),
     fight: {
       id: fight.id,
+      wipeNumber: belorenFightNumberById.get(fight.id),
       name: fight.name,
       encounterID: fight.encounterID,
       difficulty: fight.difficulty,
@@ -1466,15 +1730,11 @@ export async function analyzeBeloren(reportUrl = REPORT_URL, options = {}) {
   };
 
   if (scope === "pull") {
-    const selectedBundle = await fetchEventBundle({
-      fightIds: [fight.id],
-      startTime: fight.startTime,
-      endTime: fight.endTime,
-    });
-    const selectedAnalysis = analyzeFight(fight, selectedBundle);
+    const selectedAnalysis = analyzeFight(fight, fullBundle);
     const echoLeaderboard = selectedAnalysis.echoLeaderboard;
     const eruptionInterruptLeaderboard = selectedAnalysis.eruptionInterruptLeaderboard;
     const consumableLeaderboard = selectedAnalysis.consumableLeaderboard;
+    const eggDamageLeaderboard = selectedAnalysis.eggDamageLeaderboard;
     const deathRecords = selectedAnalysis.deathRecords;
     const mistakes = selectedAnalysis.mistakes;
     const wipeFailures = selectedAnalysis.wipeFailures;
@@ -1505,15 +1765,12 @@ export async function analyzeBeloren(reportUrl = REPORT_URL, options = {}) {
       correctQuillSoakLeaderboard: selectedAnalysis.quillLeaderboard,
       eruptionInterruptLeaderboard,
       consumableLeaderboard,
+      eggDamageLeaderboard,
     };
   }
 
   if (scope === "night") {
-    const nightBundle = await fetchEventBundle({
-      fightIds: belorenFightIds,
-      startTime: eventStartTime,
-      endTime: eventEndTime,
-    });
+    const nightBundle = fullBundle;
     const analyses = belorenFights.map((item) => analyzeFight(item, nightBundle));
 
     output.fetchedEventCounts = {
@@ -1529,6 +1786,7 @@ export async function analyzeBeloren(reportUrl = REPORT_URL, options = {}) {
       pullCount: analyses.length,
       wipeCount: analyses.filter((item) => !item.fight.kill).length,
       killCount: analyses.filter((item) => item.fight.kill).length,
+      combatDurationMs: analyses.reduce((total, item) => total + (item.fight.endTime - item.fight.startTime), 0),
       correctEchoSoakLeaderboard: mergeEchoLeaderboards(
         actorById,
         analyses.map((item) => item.echoLeaderboard),
@@ -1541,12 +1799,17 @@ export async function analyzeBeloren(reportUrl = REPORT_URL, options = {}) {
         actorById,
         analyses.map((item) => item.eruptionInterruptLeaderboard),
       ),
+      eggDamageLeaderboard: mergeEggDamageLeaderboards(
+        actorById,
+        analyses.map((item) => item.eggDamageLeaderboard),
+      ),
       consumableLeaderboard: mergeConsumableLeaderboards(
         actorById,
         analyses.map((item) => item.consumableLeaderboard),
       ),
       mistakeLeaderboard: buildMistakeLeaderboard(
         actorById,
+        uniquePlayers(analyses.flatMap((item) => item.presentPlayers)),
         analyses.map((item) => ({ fight: item.fight, mistakes: item.mistakes })),
       ),
     };
