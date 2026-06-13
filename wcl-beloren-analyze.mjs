@@ -270,6 +270,30 @@ query DamageDoneTable($code: String!, $fightIDs: [Int], $startTime: Float, $endT
 }
 `;
 
+const GUILD_REPORTS_QUERY = `
+query GuildReports($guildID: Int!, $limit: Int, $page: Int) {
+  reportData {
+    reports(guildID: $guildID, limit: $limit, page: $page) {
+      current_page
+      last_page
+      data {
+        code
+        title
+        startTime
+        endTime
+        fights {
+          id
+          encounterID
+          difficulty
+          name
+          kill
+        }
+      }
+    }
+  }
+}
+`;
+
 function loadDotEnv(path) {
   if (!existsSync(path)) return;
 
@@ -1566,6 +1590,49 @@ export async function fetchBelorenReportShell(reportUrl = REPORT_URL) {
   };
 }
 
+export async function fetchGuildBelorenReportSummaries({ guildID, difficulty, limit = 20, maxPages = 20 }) {
+  const token = await getAccessToken();
+  const reports = [];
+  let page = 1;
+  let lastPage = 1;
+
+  do {
+    const data = await graphql(token, GUILD_REPORTS_QUERY, { guildID, limit, page });
+    const pagination = data.reportData.reports;
+    reports.push(...(pagination.data || []));
+    lastPage = pagination.last_page || page;
+    page += 1;
+  } while (page <= lastPage && page <= maxPages);
+
+  return reports
+    .filter((report) =>
+      report.fights?.some(
+        (fight) =>
+          fight.encounterID === BELOREN_ENCOUNTER_ID &&
+          fight.kill === false &&
+          (difficulty === undefined || difficulty === null || fight.difficulty === difficulty),
+      ),
+    )
+    .map((report) => ({
+      code: report.code,
+      title: report.title,
+      startTime: report.startTime,
+      endTime: report.endTime,
+      belorenFightCount: report.fights.filter(
+        (fight) =>
+          fight.encounterID === BELOREN_ENCOUNTER_ID &&
+          (difficulty === undefined || difficulty === null || fight.difficulty === difficulty),
+      ).length,
+      belorenWipeCount: report.fights.filter(
+        (fight) =>
+          fight.encounterID === BELOREN_ENCOUNTER_ID &&
+          fight.kill === false &&
+          (difficulty === undefined || difficulty === null || fight.difficulty === difficulty),
+      ).length,
+    }))
+    .sort((a, b) => b.startTime - a.startTime);
+}
+
 export async function fetchBelorenReportData(reportUrl = REPORT_URL) {
   const shell = await fetchBelorenReportShell(reportUrl);
   const { reportUrl: normalizedReportUrl, reportCode, requestedFightId, report } = shell;
@@ -1705,6 +1772,7 @@ export function analyzeBelorenData(data, options = {}) {
           id: item.id,
           wipeNumber: belorenFightNumberById.get(item.id),
           name: item.name,
+          difficulty: item.difficulty,
           kill: item.kill,
           bossPercentage: item.bossPercentage,
           duration: formatTime(item.endTime - item.startTime),

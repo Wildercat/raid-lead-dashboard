@@ -2,13 +2,18 @@ import { createServer } from "node:http";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
-import { analyzeBelorenData, fetchBelorenReportData, fetchBelorenReportShell } from "../wcl-beloren-analyze.mjs";
+import {
+  analyzeBelorenData,
+  fetchBelorenReportData,
+  fetchBelorenReportShell,
+  fetchGuildBelorenReportSummaries,
+} from "../wcl-beloren-analyze.mjs";
 
 const PORT = Number(process.env.PORT || 4173);
 const ROOT = fileURLToPath(new URL(".", import.meta.url));
 const PUBLIC_ROOT = join(ROOT, "public");
 const DATA_CACHE_ROOT = process.env.DATA_CACHE_DIR || join(ROOT, "..", ".data-cache");
-const STORE_VERSION = 6;
+const STORE_VERSION = 7;
 const ENCOUNTER_ID_BELOREN = 3182;
 const ALLOWED_ALL_PROG_GUILD_ID = 811453;
 const reportStoreCache = new Map();
@@ -38,7 +43,7 @@ createServer(async (request, response) => {
 
       const scope = body.scope === "night" ? "night" : body.scope === "prog" ? "prog" : "pull";
       const reportStore = await getStoredReportDashboard(body.reportUrl, { fresh: Boolean(body.fresh) });
-      const result = responseFromReportStore(reportStore, {
+      const result = await responseFromReportStore(reportStore, {
         reportUrl: body.reportUrl,
         pullId: body.pullId || "latest",
         scope,
@@ -141,7 +146,7 @@ async function buildReportDashboardStore(reportUrl) {
   };
 }
 
-function responseFromReportStore(store, { pullId = "latest", scope }) {
+async function responseFromReportStore(store, { pullId = "latest", scope }) {
   const fight = selectFightFromStore(store, pullId);
 
   if (scope === "prog") {
@@ -154,7 +159,7 @@ function responseFromReportStore(store, { pullId = "latest", scope }) {
       summary: null,
       latestWipe: null,
       wholeNight: null,
-      allProg: buildAllProgDashboard(store),
+      allProg: await buildAllProgDashboard(store),
     };
   }
 
@@ -185,15 +190,19 @@ function responseFromReportStore(store, { pullId = "latest", scope }) {
   };
 }
 
-function buildAllProgDashboard(currentStore) {
+async function buildAllProgDashboard(currentStore) {
   const guildId = currentStore.report?.guild?.id;
+  const difficulty = currentStore.report?.pulls?.find((pull) => !pull.kill)?.difficulty || currentStore.fight?.difficulty;
   if (guildId !== ALLOWED_ALL_PROG_GUILD_ID) {
     throw new Error("All Prog is only available for AotA Mythic Raid Team reports.");
   }
 
+  await ensureGuildBelorenStores(guildId, difficulty);
+
   const stores = loadReportStores()
     .filter((store) => store.report?.guild?.id === guildId)
-    .filter((store) => store.boss?.encounterID === currentStore.boss?.encounterID);
+    .filter((store) => store.boss?.encounterID === currentStore.boss?.encounterID)
+    .filter((store) => store.report?.pulls?.some((pull) => pull.difficulty === difficulty));
 
   if (!stores.some((store) => store.reportCode === currentStore.reportCode)) stores.push(currentStore);
 
@@ -204,6 +213,15 @@ function buildAllProgDashboard(currentStore) {
     combatDurationMs: sum(stores, (store) => store.wholeNight?.combatDurationMs),
     guild: currentStore.report.guild,
     boss: currentStore.boss,
+    reports: stores
+      .map((store) => ({
+        code: store.reportCode,
+        title: store.report?.title,
+        fetchedAt: store.fetchedAt,
+        pullCount: store.wholeNight?.pullCount || 0,
+        difficulty,
+      }))
+      .sort((a, b) => a.title.localeCompare(b.title)),
     correctEchoSoakLeaderboard: mergeLeaderboardRows(stores, "correctEchoSoakLeaderboard", {
       primary: "totalCorrectSoaks",
       fields: ["totalCorrectSoaks", "lightSoaks", "voidSoaks", "immunitySoaks", "wrongColorSoaks", "deathsFromSoaks"],
@@ -229,6 +247,23 @@ function buildAllProgDashboard(currentStore) {
   };
 }
 
+async function ensureGuildBelorenStores(guildId, difficulty) {
+  const summaries = await fetchGuildBelorenReportSummaries({ guildID: guildId, difficulty });
+  const storesByCode = new Map(loadReportStores().map((store) => [store.reportCode, store]));
+
+  for (const summary of summaries) {
+    if (storesByCode.has(summary.code)) continue;
+
+    const reportUrl = `https://www.warcraftlogs.com/reports/${summary.code}`;
+    try {
+      const store = await getStoredReportDashboard(reportUrl);
+      storesByCode.set(summary.code, store);
+    } catch (error) {
+      console.warn(`Skipping guild report ${summary.code}: ${error.message}`);
+    }
+  }
+}
+
 function loadReportStores() {
   const reportDir = join(DATA_CACHE_ROOT, "reports");
   if (!existsSync(reportDir)) return [...reportStoreCache.values()];
@@ -250,11 +285,11 @@ function mergeLeaderboardRows(stores, key, { primary, fields, withSurvivalRate =
   const rows = new Map();
   for (const store of stores) {
     for (const item of store.wholeNight?.[key] || []) {
-      const playerId = item.player?.id;
-      if (!playerId) continue;
-      const row = rows.get(playerId) || { player: item.player };
+      const playerKey = playerMergeKey(item.player);
+      if (!playerKey) continue;
+      const row = rows.get(playerKey) || { player: item.player };
       for (const field of fields) row[field] = (row[field] || 0) + Number(item[field] || 0);
-      rows.set(playerId, row);
+      rows.set(playerKey, row);
     }
   }
 
@@ -273,9 +308,9 @@ function mergeMistakeLeaderboards(stores) {
   const rows = new Map();
   for (const store of stores) {
     for (const item of store.wholeNight?.mistakeLeaderboard || []) {
-      const playerId = item.player?.id;
-      if (!playerId) continue;
-      const row = rows.get(playerId) || {
+      const playerKey = playerMergeKey(item.player);
+      if (!playerKey) continue;
+      const row = rows.get(playerKey) || {
         player: item.player,
         totalMistakes: 0,
         pullCount: 0,
@@ -293,7 +328,7 @@ function mergeMistakeLeaderboards(stores) {
         current.count += mistake.count || 0;
         row.mistakeCounts.set(key, current);
       }
-      rows.set(playerId, row);
+      rows.set(playerKey, row);
     }
   }
 
@@ -305,6 +340,12 @@ function mergeMistakeLeaderboards(stores) {
       mistakes: [...row.mistakeCounts.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label)),
     }))
     .sort((a, b) => b.totalMistakes - a.totalMistakes || a.player.name.localeCompare(b.player.name));
+}
+
+function playerMergeKey(player) {
+  const name = String(player?.name || "").trim().toLowerCase();
+  if (!name) return null;
+  return `${name}:${String(player?.class || "").trim().toLowerCase()}`;
 }
 
 function sum(items, valueForItem) {
