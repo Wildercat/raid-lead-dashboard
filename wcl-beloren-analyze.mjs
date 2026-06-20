@@ -1671,6 +1671,42 @@ export async function fetchBelorenReportData(reportUrl = REPORT_URL) {
   };
 }
 
+export async function fetchBelorenFightData(reportUrl = REPORT_URL, fightIds = []) {
+  const shell = await fetchBelorenReportShell(reportUrl);
+  const { reportUrl: normalizedReportUrl, reportCode, requestedFightId, report } = shell;
+  const token = await getAccessToken();
+  const idSet = new Set(fightIds.map(Number).filter(Number.isFinite));
+  const belorenFights = report.fights
+    .filter((item) => item.encounterID === BELOREN_ENCOUNTER_ID && idSet.has(item.id))
+    .sort((a, b) => a.id - b.id);
+
+  if (!belorenFights.length) {
+    throw new Error("No matching Beloren pulls found in the report.");
+  }
+
+  const bundle = await fetchEventBundle(token, {
+    code: reportCode,
+    fightIds: belorenFights.map((item) => item.id),
+    startTime: Math.min(...belorenFights.map((item) => item.startTime)),
+    endTime: Math.max(...belorenFights.map((item) => item.endTime)),
+  });
+  const phaseDamageDoneTables = await fetchPhaseDamageTables(token, {
+    code: reportCode,
+    fights: belorenFights,
+    phaseId: 2,
+  });
+
+  return {
+    reportUrl: normalizedReportUrl,
+    reportCode,
+    requestedFightId,
+    fetchedAt: new Date().toISOString(),
+    report,
+    bundle,
+    phaseDamageDoneTables,
+  };
+}
+
 export async function analyzeBeloren(reportUrl = REPORT_URL, options = {}) {
   const data = await fetchBelorenReportData(reportUrl);
   return analyzeBelorenData(data, { ...options, reportUrl });

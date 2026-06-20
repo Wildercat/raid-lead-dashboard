@@ -4,6 +4,7 @@ import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   analyzeBelorenData,
+  fetchBelorenFightData,
   fetchBelorenReportData,
   fetchBelorenReportShell,
   fetchGuildBelorenReportSummaries,
@@ -18,6 +19,7 @@ const ENCOUNTER_ID_BELOREN = 3182;
 const ALLOWED_ALL_PROG_GUILD_ID = 811453;
 const reportStoreCache = new Map();
 const reportBuilds = new Map();
+const pullResponseCache = new Map();
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -42,6 +44,14 @@ createServer(async (request, response) => {
       }
 
       const scope = body.scope === "night" ? "night" : body.scope === "prog" ? "prog" : "pull";
+      if (scope === "pull") {
+        const result = await getPullDashboardResponse(body.reportUrl, {
+          pullId: body.pullId || "latest",
+          fresh: Boolean(body.fresh),
+        });
+        return sendJson(response, 200, result);
+      }
+
       const reportStore = await getStoredReportDashboard(body.reportUrl, { fresh: Boolean(body.fresh) });
       const result = await responseFromReportStore(reportStore, {
         reportUrl: body.reportUrl,
@@ -101,6 +111,27 @@ async function getStoredReportDashboard(reportUrl, { fresh = false } = {}) {
 
   reportBuilds.set(reportCode, buildPromise);
   return buildPromise;
+}
+
+async function getPullDashboardResponse(reportUrl, { pullId = "latest", fresh = false } = {}) {
+  const reportCode = reportCodeFromUrl(reportUrl);
+  const cacheKey = `${reportCode}:${pullId || "latest"}`;
+  if (!fresh && pullResponseCache.has(cacheKey)) return pullResponseCache.get(cacheKey);
+
+  const shell = await fetchBelorenReportShell(reportUrl);
+  const fight = selectBossFightFromReport(shell.report, pullId);
+  const fightCacheKey = `${reportCode}:${fight.id}`;
+  if (!fresh && pullResponseCache.has(fightCacheKey)) return pullResponseCache.get(fightCacheKey);
+
+  const rawData = await fetchBelorenFightData(reportUrl, [fight.id]);
+  const result = analyzeBelorenData(rawData, {
+    reportUrl,
+    pullId: String(fight.id),
+    scope: "pull",
+  });
+  pullResponseCache.set(cacheKey, result);
+  pullResponseCache.set(fightCacheKey, result);
+  return result;
 }
 
 async function buildReportDashboardStore(reportUrl) {
@@ -362,6 +393,21 @@ function selectFightFromStore(store, pullId) {
   const fight = store.pulls[String(requested.id)];
   if (!fight) throw new Error(`Stored dashboard data for wipe ${requested.id} was not found.`);
   return fight;
+}
+
+function selectBossFightFromReport(report, pullId) {
+  const fights = report.fights
+    .filter((fight) => fight.encounterID === ENCOUNTER_ID_BELOREN)
+    .sort((a, b) => a.id - b.id);
+  if (!fights.length) throw new Error("No Beloren pulls found in the report.");
+
+  if (pullId === "latest" || pullId === undefined || pullId === null || pullId === "") {
+    return fights.slice().reverse().find((fight) => !fight.kill) || fights[fights.length - 1];
+  }
+
+  const requested = fights.find((fight) => String(fight.id) === String(pullId));
+  if (!requested) throw new Error(`Wipe ${pullId} was not found in report ${report.code}.`);
+  return requested;
 }
 
 function belorenFightSignature(report) {
