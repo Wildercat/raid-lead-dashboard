@@ -15,12 +15,19 @@ let activeTab = "latest";
 let ignoreImmunitySoaks = false;
 let liveScanStartedAt = null;
 let liveScanTimedOut = false;
+let currentBossKey = "beloren";
+let selectedTerminateSpawnSetId = null;
 const ALL_PROG_GUILD_ID = 811453;
 const LAST_REPORT_URL_KEY = "beloren-dashboard:last-report-url";
-const LIVE_SCAN_INTERVAL_MS = 30000;
+const LURA_KICK_ORDER_KEY = "beloren-dashboard:lura-kick-order";
+const DEFAULT_LURA_KICK_ORDER = `Fartgrip Dreadknights Rhetorica Chairmanjeff
+Boshjanski Walshy Koralie Flashwiz
+Senpaibacon Snobshot Demo Elpumba`;
+const LIVE_SCAN_INTERVAL_MS = 2000;
 const LIVE_SCAN_TIMEOUT_MS = 3 * 60 * 60 * 1000;
 
 const els = {
+  title: document.querySelector("h1"),
   summaryGrid: document.querySelector("#summary-grid"),
   nightSummaryGrid: document.querySelector("#night-summary-grid"),
   allProgSummaryGrid: document.querySelector("#all-prog-summary-grid"),
@@ -74,6 +81,30 @@ const els = {
   allProgConsumableCount: document.querySelector("#all-prog-consumable-count"),
 };
 
+const bossLabels = {
+  beloren: {
+    title: "Belo'ren Review",
+    wipeFailures: "Wipe-Level Failures",
+    mistakesEmpty: "No mistakes detected by the current Belo'ren rules.",
+    echo: "Correct Radiant Echoes Soaks",
+    quill: "Correct Quill Soaks",
+    interrupts: "Eruption Interrupts",
+    consumables: "Healthstone / Potions",
+    eggDamage: "Egg Damage",
+  },
+  lura: {
+    title: "Midnight Falls Review",
+    wipeFailures: "Wipe Conditions",
+    mistakesEmpty: "No mistakes detected by the current Lura rules.",
+    echo: "Tears of L'ura Soaks",
+    quill: "Tears of L'ura Spawned",
+    interrupts: "Terminate Timeline",
+    nightInterrupts: "Terminate Interrupts",
+    consumables: "Light's End Wipes Caused",
+    eggDamage: "",
+  },
+};
+
 const lastReportUrl = localStorage.getItem(LAST_REPORT_URL_KEY);
 if (lastReportUrl) reportUrlInput.value = lastReportUrl;
 setStatus(lastReportUrl ? "Ready." : "Paste a Warcraft Logs report URL to start.");
@@ -120,6 +151,20 @@ els.forceScanButton.addEventListener("click", async () => {
   await scanForNewPull({ forced: true });
 });
 
+els.eruptionInterrupts.addEventListener("change", (event) => {
+  if (!event.target.matches(".terminate-spawn-select")) return;
+  selectedTerminateSpawnSetId = event.target.value;
+  els.eruptionInterrupts.innerHTML = renderTerminateTimeline(currentPullData?.latestWipe?.interruptTimeline);
+});
+
+els.eruptionInterrupts.addEventListener("click", async (event) => {
+  if (!event.target.matches(".apply-kick-order-button")) return;
+  const input = els.eruptionInterrupts.querySelector(".kick-order-input");
+  localStorage.setItem(LURA_KICK_ORDER_KEY, (input?.value || DEFAULT_LURA_KICK_ORDER).trim());
+  clearReportCaches(reportUrlInput.value.trim());
+  await analyze(reportUrlInput.value.trim(), pullSelect.value || "latest");
+});
+
 document.querySelectorAll(".ignore-immunity-toggle").forEach((toggle) => {
   toggle.addEventListener("change", () => {
     ignoreImmunitySoaks = toggle.checked;
@@ -164,11 +209,23 @@ async function fetchAnalysis({ reportUrl, pullId = "latest", scope, fresh = fals
   const response = await fetch("/api/analyze", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ reportUrl, pullId, scope, fresh }),
+    body: JSON.stringify({ reportUrl, pullId, scope, fresh, kickAssignments: kickAssignmentsForRequest() }),
   });
 
   const payload = await response.json();
   if (!response.ok) throw new Error(payload.error || "Analysis failed");
+  return payload;
+}
+
+async function fetchScan({ reportUrl, force = false }) {
+  const response = await fetch("/api/scan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reportUrl, force, kickAssignments: kickAssignmentsForRequest() }),
+  });
+
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || "Scan failed");
   return payload;
 }
 
@@ -241,7 +298,7 @@ function updateScanLabel() {
     return;
   }
 
-  els.liveLogLabel.textContent = els.liveScanToggle.checked ? "Scanning for new wipes every 30s" : "Scan for new wipes";
+  els.liveLogLabel.textContent = els.liveScanToggle.checked ? "Scanning for new wipes" : "Scan for new wipes";
 }
 
 async function scanForNewPull({ forced = false } = {}) {
@@ -259,8 +316,9 @@ async function scanForNewPull({ forced = false } = {}) {
   try {
     const reportUrl = reportUrlInput.value.trim();
     setStatus(forced ? "Checking for new wipes..." : "Scanning for new wipes...", { loading: true });
-    const payload = await fetchAnalysis({ reportUrl, pullId: "latest", scope: "pull", fresh: true });
+    const payload = await fetchScan({ reportUrl, force: forced });
     if (payload.fight.id > (latestKnownFightId || 0)) {
+      clearAggregateCaches(reportUrl);
       pullCache.set(pullCacheKey(reportUrl, "latest"), payload);
       pullCache.set(pullCacheKey(reportUrl, payload.fight.id), payload);
       latestKnownFightId = payload.fight.id;
@@ -298,10 +356,13 @@ function setActiveTab(tabName) {
 function renderDashboard(data) {
   const latest = data.latestWipe;
   const summary = data.summary;
+  currentBossKey = data.boss?.key || "beloren";
+  if (currentBossKey === "lura") selectedTerminateSpawnSetId = data.latestWipe?.interruptTimeline?.selectedSpawnSetId || null;
   currentPullData = data;
   spellMap = data.spells || spellMap;
   els.reportLink.href = reportUrlForFight(data.report.code, data.fight.id);
-  updateAllProgAccess(data.report.guild);
+  applyBossLabels(currentBossKey);
+  updateAllProgAccess(data.report.guild, data.boss);
   updateLiveState(data);
 
   renderPullOptions(data.report.pulls || [], data.fight.id);
@@ -317,7 +378,7 @@ function renderDashboard(data) {
   els.mistakeCount.textContent = latest.likelyMistakes.length + latest.wipeLevelFailures.length;
   els.soakCount.textContent = latest.correctEchoSoakLeaderboard.length;
   els.quillCount.textContent = latest.correctQuillSoakLeaderboard.length;
-  els.interruptCount.textContent = latest.eruptionInterruptLeaderboard.length;
+  els.interruptCount.textContent = currentBossKey === "lura" ? latest.interruptTimeline?.eventCount || 0 : latest.eruptionInterruptLeaderboard.length;
   els.eggDamageCount.textContent = latest.eggDamageLeaderboard.length;
   els.consumableCount.textContent = latest.consumableLeaderboard.length;
 
@@ -326,7 +387,10 @@ function renderDashboard(data) {
   els.mistakes.innerHTML = renderMistakes(latest.likelyMistakes, latest.wipeLevelFailures);
   els.echoSoaks.innerHTML = renderEchoSoaks(latest.correctEchoSoakLeaderboard, { expandable: true });
   els.quillSoaks.innerHTML = renderQuillSoaks(latest.correctQuillSoakLeaderboard);
-  els.eruptionInterrupts.innerHTML = renderEruptionInterrupts(latest.eruptionInterruptLeaderboard);
+  els.eruptionInterrupts.innerHTML =
+    currentBossKey === "lura"
+      ? renderTerminateTimeline(latest.interruptTimeline)
+      : renderEruptionInterrupts(latest.eruptionInterruptLeaderboard);
   els.eggDamage.innerHTML = renderEggDamage(latest.eggDamageLeaderboard);
   els.consumables.innerHTML = renderConsumables(latest.consumableLeaderboard);
 
@@ -339,10 +403,42 @@ function renderDashboard(data) {
   else renderAllProgPlaceholder();
 }
 
-function updateAllProgAccess(guild) {
-  const canShow = Number(guild?.id) === ALL_PROG_GUILD_ID;
+function updateAllProgAccess(guild, boss) {
+  const canShow = Number(guild?.id) === ALL_PROG_GUILD_ID && (boss?.key || "beloren") === "beloren";
   els.allProgTabButton.classList.toggle("is-hidden", !canShow);
   if (!canShow && activeTab === "all-prog") setActiveTab("latest");
+}
+
+function applyBossLabels(bossKey) {
+  const labels = bossLabels[bossKey] || bossLabels.beloren;
+  els.title.textContent = labels.title;
+  setPanelTitle(els.wipeFailures, labels.wipeFailures);
+  setPanelTitle(els.echoSoaks, labels.echo);
+  setPanelTitle(els.quillSoaks, labels.quill);
+  setPanelTitle(els.eruptionInterrupts, labels.interrupts);
+  setPanelTitle(els.consumables, labels.consumables);
+  setPanelTitle(els.eggDamage, labels.eggDamage || "Egg Damage");
+  setPanelTitle(els.nightEchoSoaks, labels.echo);
+  setPanelTitle(els.nightQuillSoaks, labels.quill);
+  setPanelTitle(els.nightEruptionInterrupts, labels.nightInterrupts || labels.interrupts);
+  setPanelTitle(els.nightConsumables, labels.consumables);
+  setPanelTitle(els.nightEggDamage, labels.eggDamage || "Egg Damage");
+  setPanelTitle(els.allProgEchoSoaks, bossLabels.beloren.echo);
+  setPanelTitle(els.allProgQuillSoaks, bossLabels.beloren.quill);
+  setPanelTitle(els.allProgEruptionInterrupts, bossLabels.beloren.interrupts);
+  setPanelTitle(els.allProgConsumables, bossLabels.beloren.consumables);
+  setPanelTitle(els.allProgEggDamage, bossLabels.beloren.eggDamage);
+  els.eggDamage.closest(".panel").classList.toggle("is-hidden", !labels.eggDamage);
+  els.nightEggDamage.closest(".panel").classList.toggle("is-hidden", !labels.eggDamage);
+  els.consumables.closest(".panel").classList.toggle("is-hidden", bossKey === "lura");
+  document.querySelectorAll(".mini-toggle").forEach((toggle) => {
+    toggle.classList.toggle("is-hidden", bossKey === "lura");
+  });
+}
+
+function setPanelTitle(contentEl, title) {
+  const heading = contentEl?.closest(".panel")?.querySelector("h2");
+  if (heading) heading.textContent = title;
 }
 
 function renderNightDashboard(night) {
@@ -448,7 +544,7 @@ function renderPullOptions(pulls, selectedFightId) {
 }
 
 function pullCacheKey(reportUrl, pullId) {
-  return `${reportUrl}::${pullId || "latest"}`;
+  return `${reportUrl}::${currentBossKey === "lura" ? simpleHash(kickAssignmentsForRequest()) : "default"}::${pullId || "latest"}`;
 }
 
 function reportUrlForFight(reportCode, fightId) {
@@ -461,6 +557,30 @@ function nightCacheKey(reportUrl) {
 
 function allProgCacheKey(reportUrl) {
   return `${reportUrl}::all-prog`;
+}
+
+function kickAssignmentsForRequest() {
+  const panelInput = document.querySelector(".kick-order-input");
+  const saved = localStorage.getItem(LURA_KICK_ORDER_KEY);
+  return currentBossKey === "lura" ? (panelInput?.value || saved || DEFAULT_LURA_KICK_ORDER).trim() : "";
+}
+
+function clearReportCaches(reportUrl) {
+  for (const key of pullCache.keys()) if (key.startsWith(`${reportUrl}::`)) pullCache.delete(key);
+  clearAggregateCaches(reportUrl);
+}
+
+function clearAggregateCaches(reportUrl) {
+  nightCache.delete(nightCacheKey(reportUrl));
+  allProgCache.delete(allProgCacheKey(reportUrl));
+}
+
+function simpleHash(value) {
+  let hash = 0;
+  for (let index = 0; index < String(value || "").length; index += 1) {
+    hash = (hash * 31 + String(value).charCodeAt(index)) >>> 0;
+  }
+  return hash.toString(36);
 }
 
 function metric(label, value) {
@@ -527,7 +647,7 @@ function renderDeathRow(row) {
 }
 
 function renderMistakes(rows, wipeFailures = []) {
-  if (!rows.length && !wipeFailures.length) return empty("No mistakes detected by the current Beloren rules.");
+  if (!rows.length && !wipeFailures.length) return empty((bossLabels[currentBossKey] || bossLabels.beloren).mistakesEmpty);
   const items = [
     ...rows.map((row) => ({ type: "mistake", timestamp: row.timestamp, row })),
     ...wipeFailures.map((row) => ({ type: "wipeFailure", timestamp: row.timestamp, row })),
@@ -579,7 +699,10 @@ function renderEchoLeaderboardSections() {
 }
 
 function renderEchoSoaks(rows, { expandable = false } = {}) {
-  if (!rows.length) return empty("No correct Radiant Echoes soaks detected.");
+  if (!rows.length) return empty(currentBossKey === "lura" ? "No Tears of L'ura soaks detected." : "No correct Radiant Echoes soaks detected.");
+  if (currentBossKey === "lura") {
+    return leaderboardBars(rows, "totalSoaks", (row) => [`Soaks ${formatNumber(row.totalSoaks)}`]);
+  }
   const rankedRows = rows
     .map((row) => ({
       ...row,
@@ -641,7 +764,10 @@ function echoDetails(row) {
 }
 
 function renderQuillSoaks(rows) {
-  if (!rows.length) return empty("No solo correct-color quill soaks detected.");
+  if (!rows.length) return empty(currentBossKey === "lura" ? "No Tears of L'ura spawns detected." : "No solo correct-color quill soaks detected.");
+  if (currentBossKey === "lura") {
+    return leaderboardBars(rows, "totalSpawned", (row) => [`Spawned ${formatNumber(row.totalSpawned)}`]);
+  }
   return leaderboardBars(
     rows,
     "totalCorrectQuills",
@@ -654,7 +780,18 @@ function renderQuillSoaks(rows) {
 }
 
 function renderEruptionInterrupts(rows) {
-  if (!rows.length) return empty("No Light/Void Eruption interrupts detected.");
+  if (!rows.length) return empty(currentBossKey === "lura" ? "No Terminate interrupts detected." : "No Light/Void Eruption interrupts detected.");
+  if (currentBossKey === "lura") {
+    return leaderboardBars(
+      rows,
+      "totalInterrupts",
+      (row) => [
+        `Success ${formatNumber(row.successfulInterrupts)}`,
+        `Out ${formatNumber(row.outOfOrderInterrupts)}`,
+        `Extra ${formatNumber(row.extraInterruptCasts)}`,
+      ],
+    );
+  }
   return leaderboardBars(
     rows,
     "totalInterrupts",
@@ -663,6 +800,143 @@ function renderEruptionInterrupts(rows) {
       `Void ${formatNumber(row.voidEruptionInterrupts)}`,
     ],
   );
+}
+
+function renderTerminateTimeline(timeline) {
+  const spawnSets = timeline?.spawnSets || [];
+  const selectedSet = spawnSets.find((set) => set.id === selectedTerminateSpawnSetId) || spawnSets.find((set) => set.id === timeline?.selectedSpawnSetId) || spawnSets[0] || null;
+  const events = selectedSet?.events || timeline?.events || [];
+  const assignedGroups = selectedSet?.assignedGroups || [];
+  const extraCasts = selectedSet?.extraCasts || [];
+  const terminateDeaths = selectedSet?.deaths || [];
+  if (!spawnSets.length && !events.length && !extraCasts.length && !terminateDeaths.length) return empty("No Terminate kicks detected.");
+  const windowStart = Number(selectedSet?.startTimestamp || Math.min(...events.map((event) => event.timestamp), ...extraCasts.map((event) => event.timestamp), ...terminateDeaths.map((event) => event.timestamp)) || 0);
+  const windowEnd = Number(selectedSet?.endTimestamp || Math.max(...events.map((event) => event.timestamp), ...extraCasts.map((event) => event.timestamp), ...terminateDeaths.map((event) => event.timestamp)) || windowStart + 1);
+  const durationMs = Math.max(1, windowEnd - windowStart);
+  return `<div class="terminate-timeline${selectedSet?.missedTerminate ? " has-failure" : ""}">
+    ${spawnSets.length > 1 ? renderTerminateSpawnPicker(spawnSets, selectedSet) : ""}
+    ${renderTerminateConfig()}
+    ${renderAssignedGroups(assignedGroups)}
+    ${renderGroupedKickTimelines(events, assignedGroups, windowStart, durationMs)}
+    ${terminateDeaths.length ? renderTerminateDeathRow(terminateDeaths, windowStart, durationMs) : ""}
+    ${extraCasts.length ? renderExtraKickRow(extraCasts, windowStart, durationMs) : ""}
+  </div>`;
+}
+
+function renderTerminateSpawnPicker(spawnSets, selectedSet) {
+  return `<div class="terminate-picker">
+    <label for="terminate-spawn-select">Matrix spawn</label>
+    <select id="terminate-spawn-select" class="terminate-spawn-select">
+      ${spawnSets.map((set) => `<option value="${escapeHtml(set.id)}"${set.id === selectedSet?.id ? " selected" : ""}>${escapeHtml(set.label)} - ${escapeHtml(set.startTime)}${set.missedTerminate ? " - missed Terminate" : ""}</option>`).join("")}
+    </select>
+  </div>`;
+}
+
+function renderAssignedGroups(groups) {
+  if (!groups.length) return "";
+  return `<div class="assigned-group-list">
+    ${groups.map((group) => `<div class="assigned-group"><strong>${escapeHtml(group.label)}</strong><div class="assigned-kicks">${(group.assignedPlayers || []).map(renderAssignedKick).join("")}</div></div>`).join("")}
+  </div>`;
+}
+
+function renderGroupedKickTimelines(events, assignedGroups, windowStart, durationMs) {
+  const groups = assignedGroups.length ? assignedGroups : [{ label: "Kicks" }];
+  const rows = groups.map((group) => ({
+    label: group.label,
+    events: events.filter((event) => event.assignmentGroup === group.label),
+  }));
+  const unassigned = events.filter((event) => !groups.some((group) => event.assignmentGroup === group.label));
+  if (unassigned.length) rows.push({ label: "Other", events: unassigned });
+
+  return rows.map((row) => `<section class="terminate-row">
+    <div class="terminate-row-head">
+      <strong>${escapeHtml(row.label)}</strong>
+      <span>${escapeHtml(row.events.length ? "Successful kicks" : "No kicks")}</span>
+    </div>
+    <div class="terminate-track">
+      ${positionedTimelineEvents(row.events || [], windowStart, durationMs).map((event) => renderKickMarker(event)).join("")}
+    </div>
+  </section>`).join("");
+}
+
+function renderTerminateConfig() {
+  return `<details class="terminate-config">
+    <summary>Configuration</summary>
+    <div class="terminate-config-body">
+      <label for="kick-order-input">Terminate kick order</label>
+      <textarea id="kick-order-input" class="kick-order-input" rows="3" spellcheck="false">${escapeHtml(kickAssignmentsForRequest())}</textarea>
+      <button class="apply-kick-order-button" type="button">Apply order</button>
+    </div>
+  </details>`;
+}
+
+function renderAssignedKick(playerInfo) {
+  const title = playerInfo.dead ? `${playerInfo.name} died at ${playerInfo.deathTime}` : playerInfo.name;
+  return `<span class="assigned-kick${playerInfo.dead ? " is-dead" : ""}" title="${escapeHtml(title)}">${escapeHtml(playerInfo.name)}${playerInfo.dead ? " dead" : ""}</span>`;
+}
+
+function renderExtraKickRow(events, windowStart, durationMs) {
+  return `<section class="terminate-row">
+    <div class="terminate-row-head">
+      <strong>Extra</strong>
+      <span>Interrupt casts</span>
+    </div>
+    <div class="terminate-track">
+      ${positionedTimelineEvents(events, windowStart, durationMs).map((event) => renderKickMarker(event)).join("")}
+    </div>
+  </section>`;
+}
+
+function renderTerminateDeathRow(events, windowStart, durationMs) {
+  const grouped = groupedTimelineEvents(events, (event) => `${event.time}:${event.abilityId || "terminate"}`);
+  return `<section class="terminate-row terminate-death-row">
+    <div class="terminate-row-head">
+      <strong>Deaths</strong>
+      <span>To Terminate</span>
+    </div>
+    <div class="terminate-track terminate-death-track">
+      ${positionedTimelineEvents(grouped, windowStart, durationMs).map((event) => renderTerminateDeathMarker(event)).join("")}
+    </div>
+  </section>`;
+}
+
+function renderTerminateDeathMarker(event) {
+  const left = event.leftPercent;
+  const lane = event.lane || 0;
+  const names = event.players?.map((item) => item.name).join(", ") || event.player?.name || "";
+  const title = `${event.time} ${names} died to ${event.abilityName || "Terminate"}`;
+  const label = event.players?.length > 1 ? `${event.players.length} players` : player(event.player);
+  return `<span class="terminate-death-marker" style="left:${left}%; top:${4 + lane * 18}px" title="${escapeHtml(title)}">
+    <span class="kick-time">${escapeHtml(event.time)}</span>
+    <span class="kick-player">${label}</span>
+  </span>`;
+}
+
+function renderKickMarker(event) {
+  const left = event.leftPercent;
+  const lane = event.lane || 0;
+  const expected = event.expectedName ? `${event.assignmentGroup || ""} #${event.order}: expected ${event.expectedName}` : event.status === "extra" ? "No successful interrupt" : "Unassigned";
+  const title = `${event.time} ${event.player?.name || ""} - ${expected}`;
+  return `<span class="kick-marker ${escapeHtml(event.status)}" style="left:${left}%; top:${4 + lane * 18}px" title="${escapeHtml(title)}">
+    <span class="kick-time">${escapeHtml(event.time)}</span>
+    <span class="kick-player">${player(event.player)}</span>
+    <span class="kick-order">${event.order ? `#${formatNumber(event.order)}` : ""}</span>
+  </span>`;
+}
+
+function positionedTimelineEvents(events = [], windowStart, durationMs) {
+  const laneEnds = [];
+  return events
+    .slice()
+    .sort((a, b) => a.timestamp - b.timestamp)
+    .map((event) => {
+      const normalized = Math.max(0, Math.min(1, (Number(event.timestamp || 0) - windowStart) / durationMs));
+      const leftPercent = 4 + normalized * 92;
+      let lane = laneEnds.findIndex((end) => leftPercent - end >= 12);
+      if (lane === -1) lane = laneEnds.length;
+      laneEnds[lane] = leftPercent;
+      return { ...event, leftPercent, lane };
+    });
 }
 
 function renderEggDamage(rows) {
@@ -675,7 +949,10 @@ function renderEggDamage(rows) {
 }
 
 function renderConsumables(rows) {
-  if (!rows.length) return empty("No healthstone or health potion usage detected.");
+  if (!rows.length) return empty(currentBossKey === "lura" ? "No Light's End wipe causes inferred." : "No healthstone or health potion usage detected.");
+  if (currentBossKey === "lura") {
+    return leaderboardBars(rows, "totalWipesCaused", (row) => [`Wipes ${formatNumber(row.totalWipesCaused)}`]);
+  }
   return leaderboardBars(
     rows,
     "totalUses",
@@ -688,7 +965,7 @@ function renderConsumables(rows) {
 }
 
 function renderNightMistakes(rows) {
-  if (!rows.length) return empty("No player mistakes detected by the current Beloren rules.");
+  if (!rows.length) return empty((bossLabels[currentBossKey] || bossLabels.beloren).mistakesEmpty);
   const max = Math.max(...rows.map((row) => row.totalMistakes), 1);
   return `<div class="night-mistake-list">
     <div class="night-mistake-header">
@@ -778,12 +1055,40 @@ function feather(value) {
 }
 
 function evidenceList(items = []) {
-  return `<div class="evidence-list">${items
+  return `<div class="evidence-list">${groupedEvidenceItems(items)
     .map(
       (item) =>
-        `<span>${escapeHtml(item.time)} ${spell(item.abilityId, item.abilityName)} -> ${escapeHtml(item.target)} (${formatNumber(item.amount)})</span>`,
+        `<span title="${escapeHtml(item.tooltip || "")}">${escapeHtml(item.time)} ${spell(item.abilityId, item.abilityName)} -> ${escapeHtml(item.targetLabel)} (${formatNumber(item.amount)})</span>`,
     )
     .join("")}</div>`;
+}
+
+function groupedEvidenceItems(items = []) {
+  const groups = new Map();
+  for (const item of items) {
+    const key = `${item.time}:${item.abilityId || item.abilityName}`;
+    const group = groups.get(key) || { ...item, amount: 0, targets: [] };
+    group.amount += Number(item.amount || 0);
+    if (item.target) group.targets.push(item.target);
+    groups.set(key, group);
+  }
+
+  return [...groups.values()].map((item) => ({
+    ...item,
+    targetLabel: item.targets.length > 1 ? `${item.targets.length} players` : item.targets[0] || item.target || "",
+    tooltip: item.targets.length > 1 ? item.targets.join(", ") : item.targets[0] || item.target || "",
+  }));
+}
+
+function groupedTimelineEvents(events = [], keyForEvent) {
+  const groups = new Map();
+  for (const event of events) {
+    const key = keyForEvent(event);
+    const group = groups.get(key) || { ...event, players: [] };
+    group.players.push(event.player);
+    groups.set(key, group);
+  }
+  return [...groups.values()];
 }
 
 function spell(abilityId, fallbackName) {

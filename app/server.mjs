@@ -4,20 +4,24 @@ import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   analyzeBelorenData,
+  fetchBelorenFightData,
   fetchBelorenReportData,
   fetchBelorenReportShell,
   fetchGuildBelorenReportSummaries,
 } from "../wcl-beloren-analyze.mjs";
+import { analyzeLuraData, fetchLuraFightData, fetchLuraReportData, LURA_ENCOUNTER_ID } from "../wcl-lura-analyze.mjs";
 
 const PORT = Number(process.env.PORT || 4173);
 const ROOT = fileURLToPath(new URL(".", import.meta.url));
 const PUBLIC_ROOT = join(ROOT, "public");
 const DATA_CACHE_ROOT = process.env.DATA_CACHE_DIR || join(ROOT, "..", ".data-cache");
-const STORE_VERSION = 7;
+const STORE_VERSION = 15;
 const ENCOUNTER_ID_BELOREN = 3182;
 const ALLOWED_ALL_PROG_GUILD_ID = 811453;
+const SHARED_SCAN_WCL_INTERVAL_MS = 5000;
 const reportStoreCache = new Map();
 const reportBuilds = new Map();
+const reportScans = new Map();
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -42,11 +46,32 @@ createServer(async (request, response) => {
       }
 
       const scope = body.scope === "night" ? "night" : body.scope === "prog" ? "prog" : "pull";
-      const reportStore = await getStoredReportDashboard(body.reportUrl, { fresh: Boolean(body.fresh) });
+      let reportStore = await getStoredReportDashboard(body.reportUrl, {
+        fresh: Boolean(body.fresh),
+        kickAssignments: typeof body.kickAssignments === "string" ? body.kickAssignments : "",
+      });
+      if ((scope === "night" || scope === "prog") && !reportStore.wholeNight) {
+        reportStore = await rebuildReportDashboardStore(body.reportUrl, {
+          kickAssignments: typeof body.kickAssignments === "string" ? body.kickAssignments : "",
+        });
+      }
       const result = await responseFromReportStore(reportStore, {
         reportUrl: body.reportUrl,
         pullId: body.pullId || "latest",
         scope,
+      });
+      return sendJson(response, 200, result);
+    }
+
+    if (request.method === "POST" && request.url === "/api/scan") {
+      const body = await readJsonBody(request);
+      if (!body.reportUrl || typeof body.reportUrl !== "string") {
+        return sendJson(response, 400, { error: "reportUrl is required" });
+      }
+
+      const result = await scanReportForNewPull(body.reportUrl, {
+        force: Boolean(body.force),
+        kickAssignments: typeof body.kickAssignments === "string" ? body.kickAssignments : "",
       });
       return sendJson(response, 200, result);
     }
@@ -63,56 +88,77 @@ createServer(async (request, response) => {
   console.log(`Beloren dashboard running at http://localhost:${PORT}`);
 });
 
-async function getStoredReportDashboard(reportUrl, { fresh = false } = {}) {
+async function getStoredReportDashboard(reportUrl, { fresh = false, kickAssignments = "" } = {}) {
   const reportCode = reportCodeFromUrl(reportUrl);
-  const memoryStore = reportStoreCache.get(reportCode);
+  const storeKey = reportStoreKey(reportCode, kickAssignments);
+  const memoryStore = reportStoreCache.get(storeKey);
   if (!fresh && memoryStore) return memoryStore;
 
   if (!fresh) {
-    const diskStore = readReportStoreFromDisk(reportCode);
+    const diskStore = readReportStoreFromDisk(storeKey);
     if (diskStore) {
-      reportStoreCache.set(reportCode, diskStore);
+      reportStoreCache.set(storeKey, diskStore);
       return diskStore;
     }
   }
 
   if (fresh) {
-    const currentStore = memoryStore || readReportStoreFromDisk(reportCode);
+    const currentStore = memoryStore || readReportStoreFromDisk(storeKey);
     if (currentStore) {
-      reportStoreCache.set(reportCode, currentStore);
+      reportStoreCache.set(storeKey, currentStore);
       const shell = await fetchBelorenReportShell(reportUrl);
-      if (currentStore.source?.belorenFightSignature === belorenFightSignature(shell.report)) {
+      if (
+        currentStore.wholeNight &&
+        currentStore.source?.bossFightSignature === bossFightSignature(shell.report, currentStore.boss?.encounterID)
+      ) {
         return currentStore;
       }
     }
   }
 
-  if (reportBuilds.has(reportCode)) return reportBuilds.get(reportCode);
+  if (reportBuilds.has(storeKey)) return reportBuilds.get(storeKey);
 
-  const buildPromise = buildReportDashboardStore(reportUrl)
+  const buildPromise = buildReportDashboardStore(reportUrl, { kickAssignments })
     .then((store) => {
-      reportStoreCache.set(reportCode, store);
-      writeReportStoreToDisk(reportCode, store);
+      reportStoreCache.set(storeKey, store);
+      writeReportStoreToDisk(storeKey, store);
       return store;
     })
     .finally(() => {
-      reportBuilds.delete(reportCode);
+      reportBuilds.delete(storeKey);
     });
 
-  reportBuilds.set(reportCode, buildPromise);
+  reportBuilds.set(storeKey, buildPromise);
   return buildPromise;
 }
 
-async function buildReportDashboardStore(reportUrl) {
-  const rawData = await fetchBelorenReportData(reportUrl);
-  const nightOutput = analyzeBelorenData(rawData, { reportUrl, scope: "night" });
+async function rebuildReportDashboardStore(reportUrl, { kickAssignments = "" } = {}) {
+  const reportCode = reportCodeFromUrl(reportUrl);
+  const storeKey = reportStoreKey(reportCode, kickAssignments);
+  const store = await buildReportDashboardStore(reportUrl, { kickAssignments });
+  reportStoreCache.set(storeKey, store);
+  writeReportStoreToDisk(storeKey, store);
+  return store;
+}
+
+async function buildReportDashboardStore(reportUrl, { kickAssignments = "" } = {}) {
+  const shell = await fetchBelorenReportShell(reportUrl);
+  const isLura = shell.report.fights.some((fight) => fight.encounterID === LURA_ENCOUNTER_ID);
+  const rawData = isLura ? await fetchLuraReportData(reportUrl) : await fetchBelorenReportData(reportUrl);
+  const analyzeData = isLura ? analyzeLuraData : analyzeBelorenData;
+  const encounterID = isLura ? LURA_ENCOUNTER_ID : ENCOUNTER_ID_BELOREN;
+  const bossName = isLura ? "Midnight Falls" : "Belo'ren, Child of Al'ar";
+  const bossKey = isLura ? "lura" : "beloren";
+  const analysisOptions = isLura ? { kickAssignments } : {};
+  const nightOutput = analyzeData(rawData, { reportUrl, scope: "night", ...analysisOptions });
   const pulls = {};
 
   for (const pull of nightOutput.report.pulls) {
-    const pullOutput = analyzeBelorenData(rawData, {
+    const pullOutput = analyzeData(rawData, {
       reportUrl,
       pullId: String(pull.id),
       scope: "pull",
+      ...analysisOptions,
     });
     pulls[pull.id] = {
       fight: pullOutput.fight,
@@ -130,13 +176,15 @@ async function buildReportDashboardStore(reportUrl) {
     reportUrl,
     fetchedAt: new Date().toISOString(),
     boss: {
-      encounterID: ENCOUNTER_ID_BELOREN,
-      name: "Belo'ren, Child of Al'ar",
+      key: bossKey,
+      encounterID,
+      name: bossName,
     },
     source: {
       reportStartTime: rawData.report.startTime,
       reportEndTime: rawData.report.endTime,
-      belorenFightSignature: belorenFightSignature(rawData.report),
+      bossFightSignature: bossFightSignature(rawData.report, encounterID),
+      kickAssignmentsHash: isLura ? hashString(kickAssignments) : null,
     },
     report: nightOutput.report,
     spells: nightOutput.spells,
@@ -146,12 +194,124 @@ async function buildReportDashboardStore(reportUrl) {
   };
 }
 
+async function scanReportForNewPull(reportUrl, { force = false, kickAssignments = "" } = {}) {
+  const store = await getStoredReportDashboard(reportUrl, { kickAssignments });
+  const storeKey = reportStoreKey(store.reportCode, kickAssignments);
+  const scanState = reportScans.get(storeKey) || {};
+  const now = Date.now();
+
+  if (!force && scanState.lastCheckedAt && now - scanState.lastCheckedAt < SHARED_SCAN_WCL_INTERVAL_MS) {
+    return {
+      ...(await responseFromReportStore(store, { pullId: "latest", scope: "pull" })),
+      scan: {
+        checkedWcl: false,
+        appendedFightIds: [],
+        nextCheckInMs: SHARED_SCAN_WCL_INTERVAL_MS - (now - scanState.lastCheckedAt),
+      },
+    };
+  }
+
+  if (scanState.promise) return scanState.promise;
+
+  const scanPromise = scanAndMaybeAppendBossFights(reportUrl, store, { kickAssignments }).finally(() => {
+    const latest = reportScans.get(storeKey) || {};
+    delete latest.promise;
+    reportScans.set(storeKey, latest);
+  });
+
+  reportScans.set(storeKey, { ...scanState, promise: scanPromise });
+  return scanPromise;
+}
+
+async function scanAndMaybeAppendBossFights(reportUrl, store, { kickAssignments = "" } = {}) {
+  const storeKey = reportStoreKey(store.reportCode, kickAssignments);
+  const shell = await fetchBelorenReportShell(reportUrl);
+  const signature = bossFightSignature(shell.report, store.boss?.encounterID);
+  let appendedFightIds = [];
+
+  if (store.source?.bossFightSignature !== signature) {
+    appendedFightIds = await appendNewBossFightsToStore(store, shell.report, { kickAssignments });
+    if (!appendedFightIds.length) {
+      store = await getStoredReportDashboard(reportUrl, { fresh: true, kickAssignments });
+    }
+  }
+
+  reportScans.set(storeKey, { lastCheckedAt: Date.now(), lastSignature: signature });
+  return {
+    ...(await responseFromReportStore(store, { pullId: "latest", scope: "pull" })),
+    scan: { checkedWcl: true, appendedFightIds, nextCheckInMs: SHARED_SCAN_WCL_INTERVAL_MS },
+  };
+}
+
+async function appendNewBossFightsToStore(store, report, { kickAssignments = "" } = {}) {
+  const existingIds = new Set(Object.keys(store.pulls || {}).map(Number));
+  const newFights = report.fights
+    .filter((fight) => fight.encounterID === store.boss?.encounterID && !existingIds.has(fight.id))
+    .sort((a, b) => a.id - b.id);
+
+  if (!newFights.length) {
+    store.source = {
+      ...(store.source || {}),
+      bossFightSignature: bossFightSignature(report, store.boss?.encounterID),
+    };
+    return [];
+  }
+
+  const reportUrl = store.reportUrl || `https://www.warcraftlogs.com/reports/${store.reportCode}`;
+  const isLura = store.boss?.key === "lura";
+  const rawData = isLura
+    ? await fetchLuraFightData(reportUrl, newFights.map((fight) => fight.id))
+    : await fetchBelorenFightData(reportUrl, newFights.map((fight) => fight.id));
+  const analyzeData = isLura ? analyzeLuraData : analyzeBelorenData;
+  const analysisOptions = isLura ? { kickAssignments } : {};
+
+  for (const fight of newFights) {
+    const pullOutput = analyzeData(rawData, {
+      reportUrl,
+      pullId: String(fight.id),
+      scope: "pull",
+      ...analysisOptions,
+    });
+    store.pulls[fight.id] = {
+      fight: pullOutput.fight,
+      fetchedEventCounts: pullOutput.fetchedEventCounts,
+      featherTimeline: pullOutput.featherTimeline,
+      summary: pullOutput.summary,
+      latestWipe: pullOutput.latestWipe,
+    };
+    store.spells = { ...(store.spells || {}), ...(pullOutput.spells || {}) };
+  }
+
+  store.report = {
+    ...store.report,
+    title: report.title,
+    guild: report.guild || null,
+    pulls: bossPullsFromReport(report, store.boss?.encounterID),
+    liveLog: liveLogStatus(report, store.boss?.encounterID),
+  };
+  store.source = {
+    ...(store.source || {}),
+    reportStartTime: report.startTime,
+    reportEndTime: report.endTime,
+    bossFightSignature: bossFightSignature(report, store.boss?.encounterID),
+  };
+  store.fetchedAt = new Date().toISOString();
+  store.wholeNight = null;
+  store.wholeNightFetchedEventCounts = {};
+
+  const storeKey = reportStoreKey(store.reportCode, kickAssignments);
+  reportStoreCache.set(storeKey, store);
+  writeReportStoreToDisk(storeKey, store);
+  return newFights.map((fight) => fight.id);
+}
+
 async function responseFromReportStore(store, { pullId = "latest", scope }) {
   const fight = selectFightFromStore(store, pullId);
 
   if (scope === "prog") {
     return {
       report: store.report,
+      boss: store.boss,
       spells: store.spells,
       fight: fight.fight,
       fetchedEventCounts: {},
@@ -166,6 +326,7 @@ async function responseFromReportStore(store, { pullId = "latest", scope }) {
   if (scope === "night") {
     return {
       report: store.report,
+      boss: store.boss,
       spells: store.spells,
       fight: fight.fight,
       fetchedEventCounts: store.wholeNightFetchedEventCounts || {},
@@ -179,6 +340,7 @@ async function responseFromReportStore(store, { pullId = "latest", scope }) {
 
   return {
     report: store.report,
+    boss: store.boss,
     spells: store.spells,
     fight: fight.fight,
     fetchedEventCounts: fight.fetchedEventCounts,
@@ -193,6 +355,9 @@ async function responseFromReportStore(store, { pullId = "latest", scope }) {
 async function buildAllProgDashboard(currentStore) {
   const guildId = currentStore.report?.guild?.id;
   const difficulty = currentStore.report?.pulls?.find((pull) => !pull.kill)?.difficulty || currentStore.fight?.difficulty;
+  if (currentStore.boss?.key !== "beloren") {
+    throw new Error("All Prog is only available for Belo'ren reports right now.");
+  }
   if (guildId !== ALLOWED_ALL_PROG_GUILD_ID) {
     throw new Error("All Prog is only available for AotA Mythic Raid Team reports.");
   }
@@ -364,9 +529,49 @@ function selectFightFromStore(store, pullId) {
   return fight;
 }
 
+function bossPullsFromReport(report, encounterID) {
+  const fights = report.fights.filter((fight) => fight.encounterID === encounterID).sort((a, b) => a.id - b.id);
+  const fightNumberById = new Map(fights.map((fight, index) => [fight.id, index + 1]));
+  return fights
+    .slice()
+    .sort((a, b) => b.id - a.id)
+    .map((fight) => ({
+      id: fight.id,
+      wipeNumber: fightNumberById.get(fight.id),
+      name: fight.name,
+      difficulty: fight.difficulty,
+      kill: fight.kill,
+      bossPercentage: fight.bossPercentage,
+      duration: formatFightDuration(fight.endTime - fight.startTime),
+    }));
+}
+
+function liveLogStatus(report, encounterID) {
+  const fights = report.fights.filter((fight) => fight.encounterID === encounterID);
+  const latestEndTime = Math.max(...fights.map((fight) => fight.endTime || 0));
+  const absoluteEndTime = report.startTime + latestEndTime;
+  return {
+    latestEndTime: absoluteEndTime,
+    activeWithinMinutes: Math.max(0, Math.round((Date.now() - absoluteEndTime) / 60000)),
+    isActive: Date.now() - absoluteEndTime <= 30 * 60 * 1000,
+  };
+}
+
+function formatFightDuration(ms) {
+  const safeMs = Math.max(0, ms);
+  const minutes = Math.floor(safeMs / 60000);
+  const seconds = Math.floor((safeMs % 60000) / 1000);
+  const tenths = Math.floor((safeMs % 1000) / 100);
+  return `${minutes}:${String(seconds).padStart(2, "0")}.${tenths}`;
+}
+
 function belorenFightSignature(report) {
+  return bossFightSignature(report, ENCOUNTER_ID_BELOREN);
+}
+
+function bossFightSignature(report, encounterID) {
   return report.fights
-    .filter((fight) => fight.encounterID === ENCOUNTER_ID_BELOREN)
+    .filter((fight) => fight.encounterID === encounterID)
     .map((fight) => `${fight.id}:${fight.startTime}:${fight.endTime}:${fight.kill}:${fight.bossPercentage}`)
     .join("|");
 }
@@ -376,6 +581,19 @@ function reportCodeFromUrl(input) {
   const match = url.pathname.match(/\/reports\/([^/]+)/);
   if (!match) throw new Error(`Could not find report code in URL: ${input}`);
   return match[1];
+}
+
+function reportStoreKey(reportCode, kickAssignments = "") {
+  const assignmentHash = kickAssignments.trim() ? `-kick-${hashString(kickAssignments)}` : "";
+  return `${reportCode}${assignmentHash}`;
+}
+
+function hashString(value) {
+  let hash = 0;
+  for (let index = 0; index < String(value || "").length; index += 1) {
+    hash = (hash * 31 + String(value).charCodeAt(index)) >>> 0;
+  }
+  return hash.toString(36);
 }
 
 function reportStorePath(reportCode) {

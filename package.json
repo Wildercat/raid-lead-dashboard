@@ -8,6 +8,6 @@
   },
   "scripts": {
     "start": "node app/server.mjs",
-    "test": "node --check app/server.mjs && node --check wcl-beloren-analyze.mjs && node --check app/public/app.js"
+    "test": "node --check app/server.mjs && node --check wcl-beloren-analyze.mjs && node --check wcl-lura-analyze.mjs && node --check app/public/app.js"
   }
 }
