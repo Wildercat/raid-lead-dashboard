@@ -1734,15 +1734,15 @@ export function analyzeBelorenData(data, options = {}) {
   const eventEndTime = Math.max(...belorenFights.map((item) => item.endTime));
   const scope = options.scope === "night" ? "night" : "pull";
   const fullBundle = data.bundle;
+  const debuffsByFight = rowsByFight(fullBundle.debuffs);
+  const damageTakenByFight = rowsByFight(fullBundle.damageTaken);
+  const deathsByFight = rowsByFight(fullBundle.deaths);
+  const castsByFight = rowsByFight(fullBundle.casts);
+  const interruptsByFight = rowsByFight(fullBundle.interrupts);
+  const healingByFight = rowsByFight(fullBundle.healing);
+  const combatantInfoByFight = rowsByFight(fullBundle.combatantInfo);
 
-  function analyzeFight(item, bundle) {
-    const debuffsByFight = rowsByFight(bundle.debuffs);
-    const damageTakenByFight = rowsByFight(bundle.damageTaken);
-    const deathsByFight = rowsByFight(bundle.deaths);
-    const castsByFight = rowsByFight(bundle.casts);
-    const interruptsByFight = rowsByFight(bundle.interrupts);
-    const healingByFight = rowsByFight(bundle.healing);
-    const combatantInfoByFight = rowsByFight(bundle.combatantInfo);
+  function analyzeFight(item) {
     const debuffs = debuffsByFight.get(item.id) || [];
     const damageTaken = damageTakenByFight.get(item.id) || [];
     const deaths = deathsByFight.get(item.id) || [];
@@ -1834,7 +1834,7 @@ export function analyzeBelorenData(data, options = {}) {
   };
 
   if (scope === "pull") {
-    const selectedAnalysis = analyzeFight(fight, fullBundle);
+    const selectedAnalysis = analyzeFight(fight);
     const echoLeaderboard = selectedAnalysis.echoLeaderboard;
     const eruptionInterruptLeaderboard = selectedAnalysis.eruptionInterruptLeaderboard;
     const consumableLeaderboard = selectedAnalysis.consumableLeaderboard;
@@ -1875,7 +1875,7 @@ export function analyzeBelorenData(data, options = {}) {
 
   if (scope === "night") {
     const nightBundle = fullBundle;
-    const analyses = belorenFights.map((item) => analyzeFight(item, nightBundle));
+    const analyses = belorenFights.map((item) => analyzeFight(item));
 
     output.fetchedEventCounts = {
       nightDebuffs: nightBundle.debuffs.length,

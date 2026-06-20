@@ -20,6 +20,7 @@ const ALLOWED_ALL_PROG_GUILD_ID = 811453;
 const reportStoreCache = new Map();
 const reportBuilds = new Map();
 const pullResponseCache = new Map();
+const nightResponseCache = new Map();
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -47,6 +48,13 @@ createServer(async (request, response) => {
       if (scope === "pull") {
         const result = await getPullDashboardResponse(body.reportUrl, {
           pullId: body.pullId || "latest",
+          fresh: Boolean(body.fresh),
+        });
+        return sendJson(response, 200, result);
+      }
+
+      if (scope === "night") {
+        const result = await getNightDashboardResponse(body.reportUrl, {
           fresh: Boolean(body.fresh),
         });
         return sendJson(response, 200, result);
@@ -131,6 +139,19 @@ async function getPullDashboardResponse(reportUrl, { pullId = "latest", fresh = 
   });
   pullResponseCache.set(cacheKey, result);
   pullResponseCache.set(fightCacheKey, result);
+  return result;
+}
+
+async function getNightDashboardResponse(reportUrl, { fresh = false } = {}) {
+  const reportCode = reportCodeFromUrl(reportUrl);
+  if (!fresh && nightResponseCache.has(reportCode)) return nightResponseCache.get(reportCode);
+
+  const rawData = await fetchBelorenReportData(reportUrl);
+  const result = analyzeBelorenData(rawData, {
+    reportUrl,
+    scope: "night",
+  });
+  nightResponseCache.set(reportCode, result);
   return result;
 }
 
