@@ -60,6 +60,23 @@ createServer(async (request, response) => {
         return sendJson(response, 200, result);
       }
 
+      if (scope === "prog") {
+        const currentNight = await getNightDashboardResponse(body.reportUrl, {
+          fresh: Boolean(body.fresh),
+        });
+        return sendJson(response, 200, {
+          report: currentNight.report,
+          spells: currentNight.spells,
+          fight: currentNight.fight,
+          fetchedEventCounts: {},
+          featherTimeline: null,
+          summary: null,
+          latestWipe: null,
+          wholeNight: null,
+          allProg: await buildAllProgDashboard(nightSummaryFromResponse(body.reportUrl, currentNight)),
+        });
+      }
+
       const reportStore = await getStoredReportDashboard(body.reportUrl, { fresh: Boolean(body.fresh) });
       const result = await responseFromReportStore(reportStore, {
         reportUrl: body.reportUrl,
@@ -146,12 +163,23 @@ async function getNightDashboardResponse(reportUrl, { fresh = false } = {}) {
   const reportCode = reportCodeFromUrl(reportUrl);
   if (!fresh && nightResponseCache.has(reportCode)) return nightResponseCache.get(reportCode);
 
+  if (!fresh) {
+    const cachedSummary = readNightSummaryFromDisk(reportCode);
+    if (cachedSummary) {
+      const response = responseFromNightSummary(cachedSummary);
+      nightResponseCache.set(reportCode, response);
+      return response;
+    }
+  }
+
   const rawData = await fetchBelorenReportData(reportUrl);
   const result = analyzeBelorenData(rawData, {
     reportUrl,
     scope: "night",
   });
+  result.reportUrl = reportUrl;
   nightResponseCache.set(reportCode, result);
+  writeNightSummaryToDisk(reportCode, nightSummaryFromResponse(reportUrl, result));
   return result;
 }
 
@@ -249,9 +277,9 @@ async function buildAllProgDashboard(currentStore) {
     throw new Error("All Prog is only available for AotA Mythic Raid Team reports.");
   }
 
-  await ensureGuildBelorenStores(guildId, difficulty);
+  await ensureGuildBelorenNightSummaries(guildId, difficulty);
 
-  const stores = loadReportStores()
+  const stores = loadNightSummaries()
     .filter((store) => store.report?.guild?.id === guildId)
     .filter((store) => store.boss?.encounterID === currentStore.boss?.encounterID)
     .filter((store) => store.report?.pulls?.some((pull) => pull.difficulty === difficulty));
@@ -299,21 +327,100 @@ async function buildAllProgDashboard(currentStore) {
   };
 }
 
-async function ensureGuildBelorenStores(guildId, difficulty) {
+async function ensureGuildBelorenNightSummaries(guildId, difficulty) {
   const summaries = await fetchGuildBelorenReportSummaries({ guildID: guildId, difficulty });
-  const storesByCode = new Map(loadReportStores().map((store) => [store.reportCode, store]));
+  const storesByCode = new Map(loadNightSummaries().map((store) => [store.reportCode, store]));
 
   for (const summary of summaries) {
     if (storesByCode.has(summary.code)) continue;
 
     const reportUrl = `https://www.warcraftlogs.com/reports/${summary.code}`;
     try {
-      const store = await getStoredReportDashboard(reportUrl);
+      const response = await getNightDashboardResponse(reportUrl);
+      const store = nightSummaryFromResponse(reportUrl, response);
       storesByCode.set(summary.code, store);
     } catch (error) {
       console.warn(`Skipping guild report ${summary.code}: ${error.message}`);
     }
   }
+}
+
+function loadNightSummaries() {
+  const summaries = new Map();
+
+  for (const response of nightResponseCache.values()) {
+    const summary = nightSummaryFromResponse(response.reportUrl || `https://www.warcraftlogs.com/reports/${response.report?.code}`, response);
+    if (summary?.reportCode) summaries.set(summary.reportCode, summary);
+  }
+
+  const summaryDir = join(DATA_CACHE_ROOT, "night-summaries");
+  if (existsSync(summaryDir)) {
+    for (const file of readdirSync(summaryDir)) {
+      if (!file.endsWith(".json")) continue;
+      const reportCode = file.slice(0, -5);
+      const summary = readNightSummaryFromDisk(reportCode);
+      if (summary) summaries.set(reportCode, summary);
+    }
+  }
+
+  for (const store of loadReportStores()) {
+    if (store?.wholeNight && !summaries.has(store.reportCode)) {
+      summaries.set(store.reportCode, nightSummaryFromStore(store));
+    }
+  }
+
+  return [...summaries.values()];
+}
+
+function nightSummaryFromResponse(reportUrl, response) {
+  if (!response?.report || !response?.wholeNight) return null;
+  return {
+    version: STORE_VERSION,
+    kind: "beloren-night-summary",
+    reportCode: response.report.code || reportCodeFromUrl(reportUrl),
+    reportUrl,
+    fetchedAt: new Date().toISOString(),
+    boss: {
+      encounterID: ENCOUNTER_ID_BELOREN,
+      name: "Belo'ren, Child of Al'ar",
+    },
+    report: response.report,
+    spells: response.spells,
+    fight: response.fight,
+    wholeNight: response.wholeNight,
+    wholeNightFetchedEventCounts: response.fetchedEventCounts || {},
+  };
+}
+
+function nightSummaryFromStore(store) {
+  return {
+    version: STORE_VERSION,
+    kind: "beloren-night-summary",
+    reportCode: store.reportCode,
+    reportUrl: store.reportUrl,
+    fetchedAt: store.fetchedAt,
+    boss: store.boss,
+    report: store.report,
+    spells: store.spells,
+    fight: store.report?.pulls?.[0] || null,
+    wholeNight: store.wholeNight,
+    wholeNightFetchedEventCounts: store.wholeNightFetchedEventCounts || {},
+  };
+}
+
+function responseFromNightSummary(summary) {
+  return {
+    reportUrl: summary.reportUrl,
+    report: summary.report,
+    spells: summary.spells,
+    fight: summary.fight || summary.report?.pulls?.[0] || null,
+    fetchedEventCounts: summary.wholeNightFetchedEventCounts || {},
+    featherTimeline: null,
+    summary: null,
+    latestWipe: null,
+    wholeNight: summary.wholeNight,
+    allProg: null,
+  };
 }
 
 function loadReportStores() {
@@ -449,6 +556,10 @@ function reportStorePath(reportCode) {
   return join(DATA_CACHE_ROOT, "reports", `${reportCode}.json`);
 }
 
+function nightSummaryPath(reportCode) {
+  return join(DATA_CACHE_ROOT, "night-summaries", `${reportCode}.json`);
+}
+
 function readReportStoreFromDisk(reportCode) {
   const path = reportStorePath(reportCode);
   if (!existsSync(path)) return null;
@@ -462,9 +573,28 @@ function readReportStoreFromDisk(reportCode) {
   }
 }
 
+function readNightSummaryFromDisk(reportCode) {
+  const path = nightSummaryPath(reportCode);
+  if (!existsSync(path)) return null;
+
+  try {
+    const summary = JSON.parse(readFileSync(path, "utf8"));
+    if (summary?.version !== STORE_VERSION || summary?.kind !== "beloren-night-summary") return null;
+    return summary;
+  } catch {
+    return null;
+  }
+}
+
 function writeReportStoreToDisk(reportCode, data) {
   mkdirSync(join(DATA_CACHE_ROOT, "reports"), { recursive: true });
   writeFileSync(reportStorePath(reportCode), JSON.stringify(data));
+}
+
+function writeNightSummaryToDisk(reportCode, data) {
+  if (!data) return;
+  mkdirSync(join(DATA_CACHE_ROOT, "night-summaries"), { recursive: true });
+  writeFileSync(nightSummaryPath(reportCode), JSON.stringify(data));
 }
 
 function readJsonBody(request) {
