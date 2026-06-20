@@ -22,6 +22,31 @@ const SHARED_SCAN_WCL_INTERVAL_MS = 5000;
 const reportStoreCache = new Map();
 const reportBuilds = new Map();
 const reportScans = new Map();
+const pullResponseCache = new Map();
+const nightResponseCache = new Map();
+
+const BOSS_ADAPTERS = {
+  beloren: {
+    key: "beloren",
+    encounterID: ENCOUNTER_ID_BELOREN,
+    name: "Belo'ren, Child of Al'ar",
+    supportsAllProg: true,
+    fetchReportData: fetchBelorenReportData,
+    fetchFightData: fetchBelorenFightData,
+    analyzeData: analyzeBelorenData,
+    analysisOptions: () => ({}),
+  },
+  lura: {
+    key: "lura",
+    encounterID: LURA_ENCOUNTER_ID,
+    name: "Midnight Falls",
+    supportsAllProg: false,
+    fetchReportData: fetchLuraReportData,
+    fetchFightData: fetchLuraFightData,
+    analyzeData: analyzeLuraData,
+    analysisOptions: ({ kickAssignments = "" } = {}) => ({ kickAssignments }),
+  },
+};
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -46,21 +71,47 @@ createServer(async (request, response) => {
       }
 
       const scope = body.scope === "night" ? "night" : body.scope === "prog" ? "prog" : "pull";
-      let reportStore = await getStoredReportDashboard(body.reportUrl, {
-        fresh: Boolean(body.fresh),
-        kickAssignments: typeof body.kickAssignments === "string" ? body.kickAssignments : "",
-      });
-      if ((scope === "night" || scope === "prog") && !reportStore.wholeNight) {
-        reportStore = await rebuildReportDashboardStore(body.reportUrl, {
-          kickAssignments: typeof body.kickAssignments === "string" ? body.kickAssignments : "",
+      const kickAssignments = typeof body.kickAssignments === "string" ? body.kickAssignments : "";
+
+      if (scope === "pull") {
+        const result = await getPullDashboardResponse(body.reportUrl, {
+          pullId: body.pullId || "latest",
+          fresh: Boolean(body.fresh),
+          kickAssignments,
+        });
+        return sendJson(response, 200, result);
+      }
+
+      if (scope === "night") {
+        const result = await getNightDashboardResponse(body.reportUrl, {
+          fresh: Boolean(body.fresh),
+          kickAssignments,
+        });
+        return sendJson(response, 200, result);
+      }
+
+      if (scope === "prog") {
+        const currentNight = await getNightDashboardResponse(body.reportUrl, {
+          fresh: Boolean(body.fresh),
+          kickAssignments,
+        });
+        const currentSummary = nightSummaryFromResponse(body.reportUrl, currentNight, {
+          adapter: adapterForBossKey(currentNight.boss?.key),
+          kickAssignments,
+        });
+        return sendJson(response, 200, {
+          report: currentNight.report,
+          boss: currentNight.boss,
+          spells: currentNight.spells,
+          fight: currentNight.fight,
+          fetchedEventCounts: {},
+          featherTimeline: null,
+          summary: null,
+          latestWipe: null,
+          wholeNight: null,
+          allProg: await buildAllProgDashboard(currentSummary),
         });
       }
-      const result = await responseFromReportStore(reportStore, {
-        reportUrl: body.reportUrl,
-        pullId: body.pullId || "latest",
-        scope,
-      });
-      return sendJson(response, 200, result);
     }
 
     if (request.method === "POST" && request.url === "/api/scan") {
@@ -132,6 +183,84 @@ async function getStoredReportDashboard(reportUrl, { fresh = false, kickAssignme
   return buildPromise;
 }
 
+async function getBossContext(reportUrl, { kickAssignments = "" } = {}) {
+  const reportCode = reportCodeFromUrl(reportUrl);
+  const shell = await fetchBelorenReportShell(reportUrl);
+  const adapter = adapterForReport(shell.report);
+  const cacheKey = bossCacheKey(reportCode, adapter, { kickAssignments });
+  return { reportCode, shell, adapter, cacheKey };
+}
+
+function adapterForReport(report) {
+  if (report.fights.some((fight) => fight.encounterID === LURA_ENCOUNTER_ID)) return BOSS_ADAPTERS.lura;
+  if (report.fights.some((fight) => fight.encounterID === ENCOUNTER_ID_BELOREN)) return BOSS_ADAPTERS.beloren;
+  throw new Error("No supported boss pulls found in the report.");
+}
+
+function adapterForBossKey(key) {
+  const adapter = BOSS_ADAPTERS[key || "beloren"];
+  if (!adapter) throw new Error(`Unsupported boss key: ${key}`);
+  return adapter;
+}
+
+function bossCacheKey(reportCode, adapter, { kickAssignments = "" } = {}) {
+  const configHash = adapter.key === "lura" && kickAssignments.trim() ? hashString(kickAssignments.trim()) : "default";
+  return `${reportCode}-${adapter.key}-${configHash}`;
+}
+
+async function getPullDashboardResponse(reportUrl, { pullId = "latest", fresh = false, kickAssignments = "" } = {}) {
+  const context = await getBossContext(reportUrl, { kickAssignments });
+  const cacheKey = `${context.cacheKey}:pull:${pullId || "latest"}`;
+  if (!fresh && pullResponseCache.has(cacheKey)) return pullResponseCache.get(cacheKey);
+
+  const fight = selectBossFightFromReport(context.shell.report, context.adapter, pullId);
+  const fightCacheKey = `${context.cacheKey}:pull:${fight.id}`;
+  if (!fresh && pullResponseCache.has(fightCacheKey)) return pullResponseCache.get(fightCacheKey);
+
+  const rawData = await context.adapter.fetchFightData(reportUrl, [fight.id]);
+  const result = context.adapter.analyzeData(rawData, {
+    reportUrl,
+    pullId: String(fight.id),
+    scope: "pull",
+    ...context.adapter.analysisOptions({ kickAssignments }),
+  });
+  normalizeBossResponse(result, context.adapter, reportUrl);
+  pullResponseCache.set(cacheKey, result);
+  pullResponseCache.set(fightCacheKey, result);
+  return result;
+}
+
+async function getNightDashboardResponse(reportUrl, { fresh = false, kickAssignments = "" } = {}) {
+  const context = await getBossContext(reportUrl, { kickAssignments });
+  if (!fresh && nightResponseCache.has(context.cacheKey)) return nightResponseCache.get(context.cacheKey);
+
+  if (!fresh) {
+    const cachedSummary = readNightSummaryFromDisk(context.cacheKey);
+    if (cachedSummary) {
+      const response = responseFromNightSummary(cachedSummary);
+      nightResponseCache.set(context.cacheKey, response);
+      return response;
+    }
+  }
+
+  const rawData = await context.adapter.fetchReportData(reportUrl);
+  const result = context.adapter.analyzeData(rawData, {
+    reportUrl,
+    scope: "night",
+    ...context.adapter.analysisOptions({ kickAssignments }),
+  });
+  normalizeBossResponse(result, context.adapter, reportUrl);
+  nightResponseCache.set(context.cacheKey, result);
+  writeNightSummaryToDisk(context.cacheKey, nightSummaryFromResponse(reportUrl, result, context));
+  return result;
+}
+
+function normalizeBossResponse(result, adapter, reportUrl) {
+  result.reportUrl = reportUrl;
+  result.boss ||= { key: adapter.key, encounterID: adapter.encounterID, name: adapter.name };
+  return result;
+}
+
 async function rebuildReportDashboardStore(reportUrl, { kickAssignments = "" } = {}) {
   const reportCode = reportCodeFromUrl(reportUrl);
   const storeKey = reportStoreKey(reportCode, kickAssignments);
@@ -143,18 +272,14 @@ async function rebuildReportDashboardStore(reportUrl, { kickAssignments = "" } =
 
 async function buildReportDashboardStore(reportUrl, { kickAssignments = "" } = {}) {
   const shell = await fetchBelorenReportShell(reportUrl);
-  const isLura = shell.report.fights.some((fight) => fight.encounterID === LURA_ENCOUNTER_ID);
-  const rawData = isLura ? await fetchLuraReportData(reportUrl) : await fetchBelorenReportData(reportUrl);
-  const analyzeData = isLura ? analyzeLuraData : analyzeBelorenData;
-  const encounterID = isLura ? LURA_ENCOUNTER_ID : ENCOUNTER_ID_BELOREN;
-  const bossName = isLura ? "Midnight Falls" : "Belo'ren, Child of Al'ar";
-  const bossKey = isLura ? "lura" : "beloren";
-  const analysisOptions = isLura ? { kickAssignments } : {};
-  const nightOutput = analyzeData(rawData, { reportUrl, scope: "night", ...analysisOptions });
+  const adapter = adapterForReport(shell.report);
+  const rawData = await adapter.fetchReportData(reportUrl);
+  const analysisOptions = adapter.analysisOptions({ kickAssignments });
+  const nightOutput = adapter.analyzeData(rawData, { reportUrl, scope: "night", ...analysisOptions });
   const pulls = {};
 
   for (const pull of nightOutput.report.pulls) {
-    const pullOutput = analyzeData(rawData, {
+    const pullOutput = adapter.analyzeData(rawData, {
       reportUrl,
       pullId: String(pull.id),
       scope: "pull",
@@ -176,15 +301,15 @@ async function buildReportDashboardStore(reportUrl, { kickAssignments = "" } = {
     reportUrl,
     fetchedAt: new Date().toISOString(),
     boss: {
-      key: bossKey,
-      encounterID,
-      name: bossName,
+      key: adapter.key,
+      encounterID: adapter.encounterID,
+      name: adapter.name,
     },
     source: {
       reportStartTime: rawData.report.startTime,
       reportEndTime: rawData.report.endTime,
-      bossFightSignature: bossFightSignature(rawData.report, encounterID),
-      kickAssignmentsHash: isLura ? hashString(kickAssignments) : null,
+      bossFightSignature: bossFightSignature(rawData.report, adapter.encounterID),
+      kickAssignmentsHash: adapter.key === "lura" ? hashString(kickAssignments) : null,
     },
     report: nightOutput.report,
     spells: nightOutput.spells,
@@ -355,18 +480,17 @@ async function responseFromReportStore(store, { pullId = "latest", scope }) {
 async function buildAllProgDashboard(currentStore) {
   const guildId = currentStore.report?.guild?.id;
   const difficulty = currentStore.report?.pulls?.find((pull) => !pull.kill)?.difficulty || currentStore.fight?.difficulty;
-  if (currentStore.boss?.key !== "beloren") {
-    throw new Error("All Prog is only available for Belo'ren reports right now.");
-  }
+  const adapter = adapterForBossKey(currentStore.boss?.key);
+  if (!adapter.supportsAllProg) throw new Error(`All Prog is not available for ${adapter.name} reports right now.`);
   if (guildId !== ALLOWED_ALL_PROG_GUILD_ID) {
     throw new Error("All Prog is only available for AotA Mythic Raid Team reports.");
   }
 
-  await ensureGuildBelorenStores(guildId, difficulty);
+  await ensureGuildBelorenNightSummaries(guildId, difficulty);
 
-  const stores = loadReportStores()
+  const stores = loadNightSummaries()
     .filter((store) => store.report?.guild?.id === guildId)
-    .filter((store) => store.boss?.encounterID === currentStore.boss?.encounterID)
+    .filter((store) => store.boss?.key === adapter.key)
     .filter((store) => store.report?.pulls?.some((pull) => pull.difficulty === difficulty));
 
   if (!stores.some((store) => store.reportCode === currentStore.reportCode)) stores.push(currentStore);
@@ -412,21 +536,112 @@ async function buildAllProgDashboard(currentStore) {
   };
 }
 
-async function ensureGuildBelorenStores(guildId, difficulty) {
+async function ensureGuildBelorenNightSummaries(guildId, difficulty) {
   const summaries = await fetchGuildBelorenReportSummaries({ guildID: guildId, difficulty });
-  const storesByCode = new Map(loadReportStores().map((store) => [store.reportCode, store]));
+  const storesByCode = new Map(loadNightSummaries().map((store) => [store.reportCode, store]));
 
   for (const summary of summaries) {
     if (storesByCode.has(summary.code)) continue;
 
     const reportUrl = `https://www.warcraftlogs.com/reports/${summary.code}`;
     try {
-      const store = await getStoredReportDashboard(reportUrl);
+      const response = await getNightDashboardResponse(reportUrl);
+      const store = nightSummaryFromResponse(reportUrl, response, {
+        adapter: BOSS_ADAPTERS.beloren,
+        cacheKey: bossCacheKey(summary.code, BOSS_ADAPTERS.beloren),
+      });
       storesByCode.set(summary.code, store);
     } catch (error) {
       console.warn(`Skipping guild report ${summary.code}: ${error.message}`);
     }
   }
+}
+
+function loadNightSummaries() {
+  const summaries = new Map();
+
+  for (const response of nightResponseCache.values()) {
+    const adapter = adapterForBossKey(response.boss?.key);
+    const reportUrl = response.reportUrl || `https://www.warcraftlogs.com/reports/${response.report?.code}`;
+    const summary = nightSummaryFromResponse(reportUrl, response, {
+      adapter,
+      cacheKey: bossCacheKey(response.report?.code, adapter),
+    });
+    if (summary?.cacheKey) summaries.set(summary.cacheKey, summary);
+  }
+
+  const summaryDir = join(DATA_CACHE_ROOT, "night-summaries");
+  if (existsSync(summaryDir)) {
+    for (const file of readdirSync(summaryDir)) {
+      if (!file.endsWith(".json")) continue;
+      const summary = readNightSummaryFromDisk(file.slice(0, -5));
+      if (summary?.cacheKey) summaries.set(summary.cacheKey, summary);
+    }
+  }
+
+  for (const store of loadReportStores()) {
+    if (store?.wholeNight) {
+      const summary = nightSummaryFromStore(store);
+      if (summary?.cacheKey && !summaries.has(summary.cacheKey)) summaries.set(summary.cacheKey, summary);
+    }
+  }
+
+  return [...summaries.values()];
+}
+
+function nightSummaryFromResponse(reportUrl, response, context = {}) {
+  if (!response?.report || !response?.wholeNight) return null;
+  const adapter = context.adapter || adapterForBossKey(response.boss?.key);
+  const reportCode = response.report.code || reportCodeFromUrl(reportUrl);
+  const cacheKey = context.cacheKey || bossCacheKey(reportCode, adapter);
+  return {
+    version: STORE_VERSION,
+    kind: "boss-night-summary",
+    cacheKey,
+    reportCode,
+    reportUrl,
+    fetchedAt: new Date().toISOString(),
+    boss: response.boss || { key: adapter.key, encounterID: adapter.encounterID, name: adapter.name },
+    report: response.report,
+    spells: response.spells,
+    fight: response.fight,
+    wholeNight: response.wholeNight,
+    wholeNightFetchedEventCounts: response.fetchedEventCounts || {},
+  };
+}
+
+function nightSummaryFromStore(store) {
+  const adapter = adapterForBossKey(store.boss?.key);
+  return {
+    version: STORE_VERSION,
+    kind: "boss-night-summary",
+    cacheKey: bossCacheKey(store.reportCode, adapter),
+    reportCode: store.reportCode,
+    reportUrl: store.reportUrl,
+    fetchedAt: store.fetchedAt,
+    boss: store.boss,
+    report: store.report,
+    spells: store.spells,
+    fight: store.report?.pulls?.[0] || null,
+    wholeNight: store.wholeNight,
+    wholeNightFetchedEventCounts: store.wholeNightFetchedEventCounts || {},
+  };
+}
+
+function responseFromNightSummary(summary) {
+  return {
+    reportUrl: summary.reportUrl,
+    report: summary.report,
+    boss: summary.boss,
+    spells: summary.spells,
+    fight: summary.fight || summary.report?.pulls?.[0] || null,
+    fetchedEventCounts: summary.wholeNightFetchedEventCounts || {},
+    featherTimeline: null,
+    summary: null,
+    latestWipe: null,
+    wholeNight: summary.wholeNight,
+    allProg: null,
+  };
 }
 
 function loadReportStores() {
@@ -529,6 +744,21 @@ function selectFightFromStore(store, pullId) {
   return fight;
 }
 
+function selectBossFightFromReport(report, adapter, pullId) {
+  const fights = report.fights
+    .filter((fight) => fight.encounterID === adapter.encounterID)
+    .sort((a, b) => a.id - b.id);
+  if (!fights.length) throw new Error(`No ${adapter.name} pulls found in the report.`);
+
+  if (pullId === "latest" || pullId === undefined || pullId === null || pullId === "") {
+    return fights.slice().reverse().find((fight) => !fight.kill) || fights[fights.length - 1];
+  }
+
+  const requested = fights.find((fight) => String(fight.id) === String(pullId));
+  if (!requested) throw new Error(`Wipe ${pullId} was not found in report ${report.code}.`);
+  return requested;
+}
+
 function bossPullsFromReport(report, encounterID) {
   const fights = report.fights.filter((fight) => fight.encounterID === encounterID).sort((a, b) => a.id - b.id);
   const fightNumberById = new Map(fights.map((fight, index) => [fight.id, index + 1]));
@@ -600,6 +830,10 @@ function reportStorePath(reportCode) {
   return join(DATA_CACHE_ROOT, "reports", `${reportCode}.json`);
 }
 
+function nightSummaryPath(cacheKey) {
+  return join(DATA_CACHE_ROOT, "night-summaries", `${cacheKey}.json`);
+}
+
 function readReportStoreFromDisk(reportCode) {
   const path = reportStorePath(reportCode);
   if (!existsSync(path)) return null;
@@ -613,9 +847,28 @@ function readReportStoreFromDisk(reportCode) {
   }
 }
 
+function readNightSummaryFromDisk(cacheKey) {
+  const path = nightSummaryPath(cacheKey);
+  if (!existsSync(path)) return null;
+
+  try {
+    const summary = JSON.parse(readFileSync(path, "utf8"));
+    if (summary?.version !== STORE_VERSION || summary?.kind !== "boss-night-summary") return null;
+    return summary;
+  } catch {
+    return null;
+  }
+}
+
 function writeReportStoreToDisk(reportCode, data) {
   mkdirSync(join(DATA_CACHE_ROOT, "reports"), { recursive: true });
   writeFileSync(reportStorePath(reportCode), JSON.stringify(data));
+}
+
+function writeNightSummaryToDisk(cacheKey, data) {
+  if (!data) return;
+  mkdirSync(join(DATA_CACHE_ROOT, "night-summaries"), { recursive: true });
+  writeFileSync(nightSummaryPath(cacheKey), JSON.stringify(data));
 }
 
 function readJsonBody(request) {
