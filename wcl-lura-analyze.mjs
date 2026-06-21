@@ -19,6 +19,7 @@ const SPELLS = {
   terminateA: 1284932,
   terminateB: 1284934,
   terminateC: 1286276,
+  resonance: 1249582,
   dissonanceA: 1249584,
   dissonanceB: 1249585,
   naaruLament: 1254256,
@@ -34,6 +35,7 @@ const SPELLS = {
 };
 
 const TERMINATE_IDS = new Set([SPELLS.terminateA, SPELLS.terminateB, SPELLS.terminateC]);
+const RESONANCE_IDS = new Set([SPELLS.resonance]);
 const DISSONANCE_IDS = new Set([SPELLS.dissonanceA, SPELLS.dissonanceB]);
 const GLAIVE_IDS = new Set([SPELLS.heavensGlaivesA, SPELLS.heavensGlaivesB]);
 const QUASAR_IDS = new Set([SPELLS.darkQuasarA, SPELLS.darkQuasarB]);
@@ -49,6 +51,7 @@ const ABILITY_NAMES = {
   [SPELLS.terminateA]: "Terminate",
   [SPELLS.terminateB]: "Terminate",
   [SPELLS.terminateC]: "Terminate",
+  [SPELLS.resonance]: "Resonance",
   [SPELLS.dissonanceA]: "Dissonance",
   [SPELLS.dissonanceB]: "Dissonance",
   [SPELLS.naaruLament]: "Naaru's Lament",
@@ -332,6 +335,7 @@ export function analyzeLuraData(data, options = {}) {
     correctQuillSoakLeaderboard: selectedAnalysis.tearsSpawnedLeaderboard,
     eruptionInterruptLeaderboard: selectedAnalysis.interruptLeaderboard,
     interruptTimeline: selectedAnalysis.interruptTimeline,
+    memoryActivations: selectedAnalysis.memoryActivations,
     consumableLeaderboard: selectedAnalysis.lightsEndCausedLeaderboard,
     eggDamageLeaderboard: [],
   };
@@ -362,6 +366,7 @@ function analyzeFight({ fight, bundle, actorById, abilityById, kickAssignments }
   });
   const mistakes = buildMistakes({ fight, actorById, damageTaken, wipeFailures });
   const deathRecords = buildDeaths({ fight, actorById, deaths, damageEvents: damageTaken, mistakes });
+  const memoryActivations = buildMemoryActivations({ fight, actorById, damageTaken });
   return {
     fight,
     damageTaken,
@@ -377,6 +382,7 @@ function analyzeFight({ fight, bundle, actorById, abilityById, kickAssignments }
     tearsSoakLeaderboard: buildTearsSoakLeaderboard({ actorById, presentPlayers, damageTaken }),
     tearsSpawnedLeaderboard: buildTearsSpawnedLeaderboard({ actorById, presentPlayers, casts }),
     interruptTimeline,
+    memoryActivations,
     interruptLeaderboard: buildInterruptLeaderboard({ actorById, presentPlayers, casts, interrupts, terminateSequences }),
     lightsEndCausedLeaderboard: buildLightsEndCausedLeaderboard({ actorById, presentPlayers, wipeFailures }),
   };
@@ -425,6 +431,50 @@ function terminateFailureEvents(damageTaken) {
       };
     })
     .filter((failure) => failure.timestamp);
+}
+
+function buildMemoryActivations({ fight, actorById, damageTaken }) {
+  const groups = new Map();
+  const relevant = damageTaken
+    .filter((event) => RESONANCE_IDS.has(abilityIdOf(event)) || DISSONANCE_IDS.has(abilityIdOf(event)))
+    .sort((a, b) => a.timestamp - b.timestamp);
+
+  for (const event of relevant) {
+    const abilityId = abilityIdOf(event);
+    const isResonance = RESONANCE_IDS.has(abilityId);
+    const isDissonance = DISSONANCE_IDS.has(abilityId);
+    const key = `${abilityId}:${event.timestamp}`;
+    const group = groups.get(key) || {
+      id: `memory-${key}`,
+      timestamp: event.timestamp,
+      time: formatTime(event.timestamp - fight.startTime),
+      abilityId,
+      abilityName: ABILITY_NAMES[abilityId] || event.ability?.name || `Ability ${abilityId}`,
+      result: isDissonance ? "dissonance" : "resonance",
+      players: new Map(),
+      amount: 0,
+    };
+    group.timestamp = Math.min(group.timestamp, event.timestamp);
+    group.time = formatTime(group.timestamp - fight.startTime);
+    group.amount += event.amount || 0;
+    if (event.targetID) group.players.set(event.targetID, actorMeta(actorById, event.targetID));
+    groups.set(key, group);
+  }
+
+  return [...groups.values()]
+    .sort((a, b) => a.timestamp - b.timestamp)
+    .map((group, index) => ({
+      id: group.id,
+      order: index + 1,
+      timestamp: group.timestamp,
+      time: group.time,
+      abilityId: group.abilityId,
+      abilityName: group.abilityName,
+      result: group.result,
+      playerCount: group.players.size,
+      players: [...group.players.values()].sort((a, b) => a.name.localeCompare(b.name)),
+      amount: group.amount,
+    }));
 }
 
 function groupWipeDamage({ fight, actorById, damageTaken, abilityIds, mechanic, label, firstOnly = false }) {

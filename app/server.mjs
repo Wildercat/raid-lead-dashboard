@@ -7,7 +7,7 @@ import {
   fetchBelorenFightData,
   fetchBelorenReportData,
   fetchBelorenReportShell,
-  fetchGuildBelorenReportSummaries,
+  fetchGuildBossReportSummaries,
 } from "../wcl-beloren-analyze.mjs";
 import { analyzeLuraData, fetchLuraFightData, fetchLuraReportData, LURA_ENCOUNTER_ID } from "../wcl-lura-analyze.mjs";
 
@@ -15,15 +15,23 @@ const PORT = Number(process.env.PORT || 4173);
 const ROOT = fileURLToPath(new URL(".", import.meta.url));
 const PUBLIC_ROOT = join(ROOT, "public");
 const DATA_CACHE_ROOT = process.env.DATA_CACHE_DIR || join(ROOT, "..", ".data-cache");
+const CHAT_LOG_PATH = process.env.CHAT_LOG_PATH || "C:\\Users\\Abram Gornik\\Documents\\WowChatLog.txt";
 const STORE_VERSION = 15;
 const ENCOUNTER_ID_BELOREN = 3182;
-const ALLOWED_ALL_PROG_GUILD_ID = 811453;
+const ALLOWED_ALL_PROG_GUILD_IDS = new Set([811453, 713862]);
 const SHARED_SCAN_WCL_INTERVAL_MS = 5000;
 const reportStoreCache = new Map();
 const reportBuilds = new Map();
 const reportScans = new Map();
 const pullResponseCache = new Map();
 const nightResponseCache = new Map();
+const LURA_SYMBOL_CALL_CODES = new Map([
+  ["t", "7242384"],
+  ["circle", "134635"],
+  ["diamond", "340528"],
+  ["triangle", "351033"],
+  ["cross", "236903"],
+]);
 
 const BOSS_ADAPTERS = {
   beloren: {
@@ -31,6 +39,21 @@ const BOSS_ADAPTERS = {
     encounterID: ENCOUNTER_ID_BELOREN,
     name: "Belo'ren, Child of Al'ar",
     supportsAllProg: true,
+    allProgLeaderboards: {
+      correctEchoSoakLeaderboard: {
+        primary: "totalCorrectSoaks",
+        fields: ["totalCorrectSoaks", "lightSoaks", "voidSoaks", "immunitySoaks", "wrongColorSoaks", "deathsFromSoaks"],
+        withSurvivalRate: true,
+      },
+      correctQuillSoakLeaderboard: {
+        primary: "totalCorrectQuills",
+        fields: ["totalCorrectQuills", "lightQuills", "voidQuills", "multiHitQuills"],
+      },
+      eruptionInterruptLeaderboard: {
+        primary: "totalInterrupts",
+        fields: ["totalInterrupts", "lightEruptionInterrupts", "voidEruptionInterrupts"],
+      },
+    },
     fetchReportData: fetchBelorenReportData,
     fetchFightData: fetchBelorenFightData,
     analyzeData: analyzeBelorenData,
@@ -40,7 +63,21 @@ const BOSS_ADAPTERS = {
     key: "lura",
     encounterID: LURA_ENCOUNTER_ID,
     name: "Midnight Falls",
-    supportsAllProg: false,
+    supportsAllProg: true,
+    allProgLeaderboards: {
+      correctEchoSoakLeaderboard: {
+        primary: "totalSoaks",
+        fields: ["totalSoaks"],
+      },
+      correctQuillSoakLeaderboard: {
+        primary: "totalSpawned",
+        fields: ["totalSpawned", "cosmicHits"],
+      },
+      eruptionInterruptLeaderboard: {
+        primary: "totalInterrupts",
+        fields: ["totalInterrupts", "successfulInterrupts", "outOfOrderInterrupts", "extraInterruptCasts"],
+      },
+    },
     fetchReportData: fetchLuraReportData,
     fetchFightData: fetchLuraFightData,
     analyzeData: analyzeLuraData,
@@ -98,6 +135,8 @@ createServer(async (request, response) => {
         const currentSummary = nightSummaryFromResponse(body.reportUrl, currentNight, {
           adapter: adapterForBossKey(currentNight.boss?.key),
           kickAssignments,
+          cacheKey: bossCacheKey(currentNight.report?.code || reportCodeFromUrl(body.reportUrl), adapterForBossKey(currentNight.boss?.key), { kickAssignments }),
+          configHash: configHashForAdapter(adapterForBossKey(currentNight.boss?.key), { kickAssignments }),
         });
         return sendJson(response, 200, {
           report: currentNight.report,
@@ -109,7 +148,7 @@ createServer(async (request, response) => {
           summary: null,
           latestWipe: null,
           wholeNight: null,
-          allProg: await buildAllProgDashboard(currentSummary),
+          allProg: await buildAllProgDashboard(currentSummary, { discoverReports: Boolean(body.discoverReports), kickAssignments }),
         });
       }
     }
@@ -187,8 +226,9 @@ async function getBossContext(reportUrl, { kickAssignments = "" } = {}) {
   const reportCode = reportCodeFromUrl(reportUrl);
   const shell = await fetchBelorenReportShell(reportUrl);
   const adapter = adapterForReport(shell.report);
+  const configHash = configHashForAdapter(adapter, { kickAssignments });
   const cacheKey = bossCacheKey(reportCode, adapter, { kickAssignments });
-  return { reportCode, shell, adapter, cacheKey };
+  return { reportCode, shell, adapter, cacheKey, configHash };
 }
 
 function adapterForReport(report) {
@@ -204,8 +244,11 @@ function adapterForBossKey(key) {
 }
 
 function bossCacheKey(reportCode, adapter, { kickAssignments = "" } = {}) {
-  const configHash = adapter.key === "lura" && kickAssignments.trim() ? hashString(kickAssignments.trim()) : "default";
-  return `${reportCode}-${adapter.key}-${configHash}`;
+  return `${reportCode}-${adapter.key}-${configHashForAdapter(adapter, { kickAssignments })}`;
+}
+
+function configHashForAdapter(adapter, { kickAssignments = "" } = {}) {
+  return adapter.key === "lura" && kickAssignments.trim() ? hashString(kickAssignments.trim()) : "default";
 }
 
 async function getPullDashboardResponse(reportUrl, { pullId = "latest", fresh = false, kickAssignments = "" } = {}) {
@@ -225,6 +268,7 @@ async function getPullDashboardResponse(reportUrl, { pullId = "latest", fresh = 
     ...context.adapter.analysisOptions({ kickAssignments }),
   });
   normalizeBossResponse(result, context.adapter, reportUrl);
+  attachChatLogData(result, context.shell.report, context.adapter);
   pullResponseCache.set(cacheKey, result);
   pullResponseCache.set(fightCacheKey, result);
   return result;
@@ -250,6 +294,7 @@ async function getNightDashboardResponse(reportUrl, { fresh = false, kickAssignm
     ...context.adapter.analysisOptions({ kickAssignments }),
   });
   normalizeBossResponse(result, context.adapter, reportUrl);
+  attachChatLogData(result, context.shell.report, context.adapter);
   nightResponseCache.set(context.cacheKey, result);
   writeNightSummaryToDisk(context.cacheKey, nightSummaryFromResponse(reportUrl, result, context));
   return result;
@@ -258,6 +303,17 @@ async function getNightDashboardResponse(reportUrl, { fresh = false, kickAssignm
 function normalizeBossResponse(result, adapter, reportUrl) {
   result.reportUrl = reportUrl;
   result.boss ||= { key: adapter.key, encounterID: adapter.encounterID, name: adapter.name };
+  return result;
+}
+
+function attachChatLogData(result, report, adapter) {
+  if (adapter.key !== "lura" || !result?.latestWipe || !result?.fight) return result;
+  result.latestWipe.symbolMacroSequences = buildLuraSymbolMacroSequences({
+    report,
+    fightId: result.fight.id,
+    chatText: readChatLogText(),
+    memoryActivations: result.latestWipe.memoryActivations || [],
+  });
   return result;
 }
 
@@ -477,20 +533,21 @@ async function responseFromReportStore(store, { pullId = "latest", scope }) {
   };
 }
 
-async function buildAllProgDashboard(currentStore) {
+async function buildAllProgDashboard(currentStore, { discoverReports = false, kickAssignments = "" } = {}) {
   const guildId = currentStore.report?.guild?.id;
   const difficulty = currentStore.report?.pulls?.find((pull) => !pull.kill)?.difficulty || currentStore.fight?.difficulty;
   const adapter = adapterForBossKey(currentStore.boss?.key);
   if (!adapter.supportsAllProg) throw new Error(`All Prog is not available for ${adapter.name} reports right now.`);
-  if (guildId !== ALLOWED_ALL_PROG_GUILD_ID) {
-    throw new Error("All Prog is only available for AotA Mythic Raid Team reports.");
+  if (!ALLOWED_ALL_PROG_GUILD_IDS.has(Number(guildId))) {
+    throw new Error("All Prog is not available for this guild.");
   }
 
-  await ensureGuildBelorenNightSummaries(guildId, difficulty);
+  if (discoverReports) await ensureGuildBossNightSummaries({ guildId, difficulty, adapter, kickAssignments });
 
   const stores = loadNightSummaries()
     .filter((store) => store.report?.guild?.id === guildId)
     .filter((store) => store.boss?.key === adapter.key)
+    .filter((store) => (store.configHash || "default") === (currentStore.configHash || "default"))
     .filter((store) => store.report?.pulls?.some((pull) => pull.difficulty === difficulty));
 
   if (!stores.some((store) => store.reportCode === currentStore.reportCode)) stores.push(currentStore);
@@ -509,25 +566,17 @@ async function buildAllProgDashboard(currentStore) {
         fetchedAt: store.fetchedAt,
         pullCount: store.wholeNight?.pullCount || 0,
         difficulty,
+        url: store.reportUrl || `https://www.warcraftlogs.com/reports/${store.reportCode}`,
       }))
       .sort((a, b) => a.title.localeCompare(b.title)),
-    correctEchoSoakLeaderboard: mergeLeaderboardRows(stores, "correctEchoSoakLeaderboard", {
-      primary: "totalCorrectSoaks",
-      fields: ["totalCorrectSoaks", "lightSoaks", "voidSoaks", "immunitySoaks", "wrongColorSoaks", "deathsFromSoaks"],
-      withSurvivalRate: true,
-    }),
-    correctQuillSoakLeaderboard: mergeLeaderboardRows(stores, "correctQuillSoakLeaderboard", {
-      primary: "totalCorrectQuills",
-      fields: ["totalCorrectQuills", "lightQuills", "voidQuills", "multiHitQuills"],
-    }),
+    discoveredReports: discoverReports,
+    correctEchoSoakLeaderboard: mergeLeaderboardRows(stores, "correctEchoSoakLeaderboard", adapter.allProgLeaderboards.correctEchoSoakLeaderboard),
+    correctQuillSoakLeaderboard: mergeLeaderboardRows(stores, "correctQuillSoakLeaderboard", adapter.allProgLeaderboards.correctQuillSoakLeaderboard),
     eggDamageLeaderboard: mergeLeaderboardRows(stores, "eggDamageLeaderboard", {
       primary: "totalDamage",
       fields: ["totalDamage"],
     }),
-    eruptionInterruptLeaderboard: mergeLeaderboardRows(stores, "eruptionInterruptLeaderboard", {
-      primary: "totalInterrupts",
-      fields: ["totalInterrupts", "lightEruptionInterrupts", "voidEruptionInterrupts"],
-    }),
+    eruptionInterruptLeaderboard: mergeLeaderboardRows(stores, "eruptionInterruptLeaderboard", adapter.allProgLeaderboards.eruptionInterruptLeaderboard),
     consumableLeaderboard: mergeLeaderboardRows(stores, "consumableLeaderboard", {
       primary: "totalUses",
       fields: ["totalUses", "healthstoneUses", "healthPotionUses", "healing", "overheal"],
@@ -536,19 +585,26 @@ async function buildAllProgDashboard(currentStore) {
   };
 }
 
-async function ensureGuildBelorenNightSummaries(guildId, difficulty) {
-  const summaries = await fetchGuildBelorenReportSummaries({ guildID: guildId, difficulty });
-  const storesByCode = new Map(loadNightSummaries().map((store) => [store.reportCode, store]));
+async function ensureGuildBossNightSummaries({ guildId, difficulty, adapter, kickAssignments = "" }) {
+  const summaries = await fetchGuildBossReportSummaries({ guildID: guildId, difficulty, encounterID: adapter.encounterID });
+  const configHash = configHashForAdapter(adapter, { kickAssignments });
+  const storesByCode = new Map(
+    loadNightSummaries()
+      .filter((store) => store.boss?.key === adapter.key)
+      .filter((store) => (store.configHash || "default") === configHash)
+      .map((store) => [store.reportCode, store]),
+  );
 
   for (const summary of summaries) {
     if (storesByCode.has(summary.code)) continue;
 
     const reportUrl = `https://www.warcraftlogs.com/reports/${summary.code}`;
     try {
-      const response = await getNightDashboardResponse(reportUrl);
+      const response = await getNightDashboardResponse(reportUrl, { kickAssignments });
       const store = nightSummaryFromResponse(reportUrl, response, {
-        adapter: BOSS_ADAPTERS.beloren,
-        cacheKey: bossCacheKey(summary.code, BOSS_ADAPTERS.beloren),
+        adapter,
+        cacheKey: bossCacheKey(summary.code, adapter, { kickAssignments }),
+        configHash,
       });
       storesByCode.set(summary.code, store);
     } catch (error) {
@@ -594,10 +650,12 @@ function nightSummaryFromResponse(reportUrl, response, context = {}) {
   const adapter = context.adapter || adapterForBossKey(response.boss?.key);
   const reportCode = response.report.code || reportCodeFromUrl(reportUrl);
   const cacheKey = context.cacheKey || bossCacheKey(reportCode, adapter);
+  const configHash = context.configHash || configHashForAdapter(adapter);
   return {
     version: STORE_VERSION,
     kind: "boss-night-summary",
     cacheKey,
+    configHash,
     reportCode,
     reportUrl,
     fetchedAt: new Date().toISOString(),
@@ -616,6 +674,7 @@ function nightSummaryFromStore(store) {
     version: STORE_VERSION,
     kind: "boss-night-summary",
     cacheKey: bossCacheKey(store.reportCode, adapter),
+    configHash: configHashForAdapter(adapter),
     reportCode: store.reportCode,
     reportUrl: store.reportUrl,
     fetchedAt: store.fetchedAt,
@@ -642,6 +701,191 @@ function responseFromNightSummary(summary) {
     wholeNight: summary.wholeNight,
     allProg: null,
   };
+}
+
+function readChatLogText() {
+  if (!CHAT_LOG_PATH || !existsSync(CHAT_LOG_PATH)) return "";
+  try {
+    return readFileSync(CHAT_LOG_PATH, "utf8");
+  } catch {
+    return "";
+  }
+}
+
+function buildLuraSymbolMacroSequences({ report, fightId, chatText, memoryActivations = [] }) {
+  if (!chatText) return { source: "missing", sequences: [], eventCount: 0 };
+  const fight = report.fights.find((item) => item.id === fightId);
+  if (!fight) return { source: "missing_fight", sequences: [], eventCount: 0 };
+
+  const entries = parseWowChatLog(chatText, report.startTime);
+  const fightStart = report.startTime + fight.startTime;
+  const fightEnd = report.startTime + fight.endTime;
+  let severYells = entries
+    .filter((entry) => entry.type === "sever" && entry.timestamp >= fightStart - 5000 && entry.timestamp <= fightEnd + 5000)
+    .sort((a, b) => a.timestamp - b.timestamp);
+  let macroEvents = entries
+    .filter((entry) => entry.type === "macro" && entry.timestamp >= fightStart - 5000 && entry.timestamp <= fightEnd + 5000)
+    .sort((a, b) => a.timestamp - b.timestamp);
+  let timeBase = fightStart;
+  let source = "chat_log";
+
+  if (!severYells.length && !macroEvents.length) {
+    const fallback = chatWindowForFightOrdinal({ report, fight, entries });
+    if (fallback) {
+      severYells = entries
+        .filter((entry) => entry.type === "sever" && entry.timestamp >= fallback.start && entry.timestamp <= fallback.end)
+        .sort((a, b) => a.timestamp - b.timestamp);
+      macroEvents = entries
+        .filter((entry) => entry.type === "macro" && entry.timestamp >= fallback.start && entry.timestamp <= fallback.end)
+        .sort((a, b) => a.timestamp - b.timestamp);
+      timeBase = fallback.start;
+      source = "chat_log_ordinal";
+    }
+  }
+
+  const activationGroups = groupMemoryActivationsBySequence(memoryActivations);
+  const sequenceCount = Math.max(severYells.length, activationGroups.length);
+  const sequences = Array.from({ length: sequenceCount }, (_, index) => {
+    const sever = severYells[index] || {
+      timestamp: memoryActivations[index]?.timestamp || fightStart,
+    };
+    const nextSever = severYells[index + 1]?.timestamp || fightEnd + 5000;
+    const windowEnd = Math.min(nextSever, sever.timestamp + 18000);
+    const events = macroEvents
+      .filter((event) => event.timestamp >= sever.timestamp && event.timestamp <= windowEnd)
+      .map((event, order) => ({
+        order: order + 1,
+        timestamp: event.timestamp,
+        time: formatFightDuration(event.timestamp - timeBase),
+        offsetMs: event.timestamp - sever.timestamp,
+        player: event.player,
+        fullPlayer: event.fullPlayer,
+        code: event.code,
+      }));
+    return {
+      id: `symbol-${fight.id}-${index + 1}`,
+      order: index + 1,
+      timestamp: sever.timestamp,
+      time: formatFightDuration(sever.timestamp - timeBase),
+      eventCount: events.length,
+      events,
+      activations: (activationGroups[index] || [])
+        .map((activation, activationIndex) => ({
+          ...activation,
+          order: activationIndex + 1,
+          time: activation.time || formatFightDuration(activation.timestamp - fightStart),
+        })),
+    };
+  });
+
+  const assigned = new Set(sequences.flatMap((sequence) => sequence.events.map((event) => event.timestamp)));
+  const unassigned = macroEvents
+    .filter((event) => !assigned.has(event.timestamp))
+    .map((event, order) => ({
+      order: order + 1,
+      timestamp: event.timestamp,
+      time: formatFightDuration(event.timestamp - timeBase),
+      offsetMs: null,
+      player: event.player,
+      fullPlayer: event.fullPlayer,
+      code: event.code,
+    }));
+  if (unassigned.length) {
+    sequences.push({
+      id: `symbol-${fight.id}-unassigned`,
+      order: sequences.length + 1,
+      timestamp: unassigned[0].timestamp,
+      time: unassigned[0].time,
+      eventCount: unassigned.length,
+      unassigned: true,
+      events: unassigned,
+    });
+  }
+
+  return {
+    source,
+    path: CHAT_LOG_PATH,
+    sequenceCount: sequences.length,
+    eventCount: sequences.reduce((total, sequence) => total + sequence.events.length, 0),
+    sequences,
+  };
+}
+
+function groupMemoryActivationsBySequence(activations = []) {
+  const groups = [];
+  for (const activation of [...activations].sort((a, b) => a.timestamp - b.timestamp)) {
+    const current = groups[groups.length - 1];
+    const previous = current?.[current.length - 1];
+    if (!current || (previous && activation.timestamp - previous.timestamp > 25000)) {
+      groups.push([activation]);
+    } else {
+      current.push(activation);
+    }
+  }
+  return groups;
+}
+
+function chatWindowForFightOrdinal({ report, fight, entries }) {
+  const fights = report.fights.filter((item) => item.encounterID === LURA_ENCOUNTER_ID).sort((a, b) => a.id - b.id);
+  const fightIndex = fights.findIndex((item) => item.id === fight.id);
+  if (fightIndex === -1) return null;
+
+  const starts = entries.filter((entry) => entry.type === "pullStart").sort((a, b) => a.timestamp - b.timestamp);
+  if (!starts.length) return null;
+  const firstMappedFightIndex = Math.max(0, fights.length - starts.length);
+  const chatIndex = fightIndex - firstMappedFightIndex;
+  if (chatIndex < 0 || chatIndex >= starts.length) return null;
+  return {
+    start: starts[chatIndex].timestamp,
+    end: starts[chatIndex + 1]?.timestamp || starts[chatIndex].timestamp + Math.max(180000, fight.endTime - fight.startTime + 30000),
+  };
+}
+
+function parseWowChatLog(chatText, reportStartTime) {
+  const reportDate = new Date(reportStartTime);
+  const year = reportDate.getFullYear();
+  const entries = [];
+
+  for (const line of chatText.split(/\r?\n/)) {
+    const match = line.match(/^(\d{1,2})\/(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\.(\d{3})\s{2}(.*)$/);
+    if (!match) continue;
+    const [, month, day, hour, minute, second, millisecond, message] = match;
+    const timestamp = new Date(
+      year,
+      Number(month) - 1,
+      Number(day),
+      Number(hour),
+      Number(minute),
+      Number(second),
+      Number(millisecond),
+    ).getTime();
+
+    if (/L'ura yells: Darkness embrace you\./.test(message)) {
+      entries.push({ type: "pullStart", timestamp });
+      continue;
+    }
+
+    if (/L'ura yells: Sever the Light\./.test(message)) {
+      entries.push({ type: "sever", timestamp });
+      continue;
+    }
+
+    const raidMatch = message.match(/\|Hchannel:RAID\|h\[(?:Raid Leader|Raid)\]\|h\s+([^:]+):\s*(\d{5,8}|T|Circle|Diamond|Triangle|Cross)\s*$/i);
+    if (!raidMatch) continue;
+    const fullPlayer = raidMatch[1].trim();
+    const callout = raidMatch[2].trim();
+    const code = LURA_SYMBOL_CALL_CODES.get(callout.toLowerCase()) || callout;
+    entries.push({
+      type: "macro",
+      timestamp,
+      fullPlayer,
+      player: fullPlayer.split("-")[0],
+      code,
+      callout,
+    });
+  }
+
+  return entries.sort((a, b) => a.timestamp - b.timestamp);
 }
 
 function loadReportStores() {

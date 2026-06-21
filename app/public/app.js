@@ -17,12 +17,20 @@ let liveScanStartedAt = null;
 let liveScanTimedOut = false;
 let currentBossKey = "beloren";
 let selectedTerminateSpawnSetId = null;
-const ALL_PROG_GUILD_ID = 811453;
+let selectedMemorySequenceId = null;
+const ALL_PROG_GUILD_IDS = new Set([811453, 713862]);
 const LAST_REPORT_URL_KEY = "beloren-dashboard:last-report-url";
 const LURA_KICK_ORDER_KEY = "beloren-dashboard:lura-kick-order";
 const DEFAULT_LURA_KICK_ORDER = `Fartgrip Dreadknights Rhetorica Chairmanjeff
 Boshjanski Walshy Koralie Flashwiz
 Senpaibacon Snobshot Demo Elpumba`;
+const LURA_SYMBOL_ICONS = {
+  7242384: { name: "T", src: "/assets/lura-symbols/t.png" },
+  134635: { name: "Circle", src: "/assets/lura-symbols/circle.png" },
+  340528: { name: "Diamond", src: "/assets/lura-symbols/diamond.png" },
+  351033: { name: "Triangle", src: "/assets/lura-symbols/triangle.png" },
+  236903: { name: "Cross", src: "/assets/lura-symbols/cross.png" },
+};
 const LIVE_SCAN_INTERVAL_MS = 2000;
 const LIVE_SCAN_TIMEOUT_MS = 3 * 60 * 60 * 1000;
 
@@ -37,6 +45,7 @@ const els = {
   echoSoaks: document.querySelector("#echo-soaks"),
   quillSoaks: document.querySelector("#quill-soaks"),
   eruptionInterrupts: document.querySelector("#eruption-interrupts"),
+  symbolCalls: document.querySelector("#symbol-calls"),
   eggDamage: document.querySelector("#egg-damage"),
   consumables: document.querySelector("#consumables"),
   nightMistakes: document.querySelector("#night-mistakes"),
@@ -65,6 +74,7 @@ const els = {
   soakCount: document.querySelector("#soak-count"),
   quillCount: document.querySelector("#quill-count"),
   interruptCount: document.querySelector("#interrupt-count"),
+  symbolCallCount: document.querySelector("#symbol-call-count"),
   eggDamageCount: document.querySelector("#egg-damage-count"),
   consumableCount: document.querySelector("#consumable-count"),
   nightMistakeCount: document.querySelector("#night-mistake-count"),
@@ -89,6 +99,7 @@ const bossLabels = {
     echo: "Correct Radiant Echoes Soaks",
     quill: "Correct Quill Soaks",
     interrupts: "Eruption Interrupts",
+    symbolCalls: "",
     consumables: "Healthstone / Potions",
     eggDamage: "Egg Damage",
   },
@@ -100,6 +111,7 @@ const bossLabels = {
     quill: "Tears of L'ura Spawned",
     interrupts: "Terminate Timeline",
     nightInterrupts: "Terminate Interrupts",
+    symbolCalls: "Memory Game",
     consumables: "Light's End Wipes Caused",
     eggDamage: "",
   },
@@ -165,6 +177,18 @@ els.eruptionInterrupts.addEventListener("click", async (event) => {
   await analyze(reportUrlInput.value.trim(), pullSelect.value || "latest");
 });
 
+els.symbolCalls.addEventListener("change", (event) => {
+  if (!event.target.matches(".memory-sequence-select")) return;
+  selectedMemorySequenceId = event.target.value;
+  els.symbolCalls.innerHTML = renderSymbolCalls(currentPullData?.latestWipe?.symbolMacroSequences);
+});
+
+els.allProgSummaryGrid.addEventListener("click", async (event) => {
+  if (!event.target.matches(".discover-reports-button")) return;
+  event.target.disabled = true;
+  await loadAllProg(reportUrlInput.value.trim(), { discoverReports: true });
+});
+
 document.querySelectorAll(".ignore-immunity-toggle").forEach((toggle) => {
   toggle.addEventListener("change", () => {
     ignoreImmunitySoaks = toggle.checked;
@@ -205,11 +229,11 @@ async function analyze(reportUrl, pullId = pullSelect.value || "latest") {
   }
 }
 
-async function fetchAnalysis({ reportUrl, pullId = "latest", scope, fresh = false }) {
+async function fetchAnalysis({ reportUrl, pullId = "latest", scope, fresh = false, discoverReports = false }) {
   const response = await fetch("/api/analyze", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ reportUrl, pullId, scope, fresh, kickAssignments: kickAssignmentsForRequest() }),
+    body: JSON.stringify({ reportUrl, pullId, scope, fresh, discoverReports, kickAssignments: kickAssignmentsForRequest() }),
   });
 
   const payload = await response.json();
@@ -252,20 +276,20 @@ async function loadWholeNight(reportUrl) {
   }
 }
 
-async function loadAllProg(reportUrl) {
+async function loadAllProg(reportUrl, { discoverReports = false } = {}) {
   if (!reportUrl || dashboardEl.classList.contains("is-empty") || els.allProgTabButton.classList.contains("is-hidden")) return;
   const cacheKey = allProgCacheKey(reportUrl);
-  if (allProgCache.has(cacheKey)) {
+  if (!discoverReports && allProgCache.has(cacheKey)) {
     const cached = allProgCache.get(cacheKey);
     renderAllProgDashboard(cached.allProg);
     setStatus(cached.report.title);
     return;
   }
 
-  setStatus("Fetching all-prog data...", { loading: true });
+  setStatus(discoverReports ? "Finding guild reports..." : "Loading cached all-prog data...", { loading: true });
 
   try {
-    const payload = await fetchAnalysis({ reportUrl, scope: "prog" });
+    const payload = await fetchAnalysis({ reportUrl, scope: "prog", discoverReports });
     spellMap = payload.spells || spellMap;
     allProgCache.set(cacheKey, payload);
     renderAllProgDashboard(payload.allProg);
@@ -358,6 +382,7 @@ function renderDashboard(data) {
   const summary = data.summary;
   currentBossKey = data.boss?.key || "beloren";
   if (currentBossKey === "lura") selectedTerminateSpawnSetId = data.latestWipe?.interruptTimeline?.selectedSpawnSetId || null;
+  if (currentBossKey === "lura") selectedMemorySequenceId = data.latestWipe?.symbolMacroSequences?.sequences?.[0]?.id || null;
   currentPullData = data;
   spellMap = data.spells || spellMap;
   els.reportLink.href = reportUrlForFight(data.report.code, data.fight.id);
@@ -379,6 +404,7 @@ function renderDashboard(data) {
   els.soakCount.textContent = latest.correctEchoSoakLeaderboard.length;
   els.quillCount.textContent = latest.correctQuillSoakLeaderboard.length;
   els.interruptCount.textContent = currentBossKey === "lura" ? latest.interruptTimeline?.eventCount || 0 : latest.eruptionInterruptLeaderboard.length;
+  els.symbolCallCount.textContent = latest.symbolMacroSequences?.eventCount || 0;
   els.eggDamageCount.textContent = latest.eggDamageLeaderboard.length;
   els.consumableCount.textContent = latest.consumableLeaderboard.length;
 
@@ -391,6 +417,7 @@ function renderDashboard(data) {
     currentBossKey === "lura"
       ? renderTerminateTimeline(latest.interruptTimeline)
       : renderEruptionInterrupts(latest.eruptionInterruptLeaderboard);
+  els.symbolCalls.innerHTML = renderSymbolCalls(latest.symbolMacroSequences);
   els.eggDamage.innerHTML = renderEggDamage(latest.eggDamageLeaderboard);
   els.consumables.innerHTML = renderConsumables(latest.consumableLeaderboard);
 
@@ -404,18 +431,19 @@ function renderDashboard(data) {
 }
 
 function updateAllProgAccess(guild, boss) {
-  const canShow = Number(guild?.id) === ALL_PROG_GUILD_ID && (boss?.key || "beloren") === "beloren";
+  const canShow = ALL_PROG_GUILD_IDS.has(Number(guild?.id)) && Boolean(boss?.key);
   els.allProgTabButton.classList.toggle("is-hidden", !canShow);
   if (!canShow && activeTab === "all-prog") setActiveTab("latest");
 }
 
 function applyBossLabels(bossKey) {
   const labels = bossLabels[bossKey] || bossLabels.beloren;
-  els.title.textContent = labels.title;
+  els.title.textContent = "Raid Lead Dashboard";
   setPanelTitle(els.wipeFailures, labels.wipeFailures);
   setPanelTitle(els.echoSoaks, labels.echo);
   setPanelTitle(els.quillSoaks, labels.quill);
   setPanelTitle(els.eruptionInterrupts, labels.interrupts);
+  setPanelTitle(els.symbolCalls, labels.symbolCalls || "Symbol Calls");
   setPanelTitle(els.consumables, labels.consumables);
   setPanelTitle(els.eggDamage, labels.eggDamage || "Egg Damage");
   setPanelTitle(els.nightEchoSoaks, labels.echo);
@@ -423,13 +451,15 @@ function applyBossLabels(bossKey) {
   setPanelTitle(els.nightEruptionInterrupts, labels.nightInterrupts || labels.interrupts);
   setPanelTitle(els.nightConsumables, labels.consumables);
   setPanelTitle(els.nightEggDamage, labels.eggDamage || "Egg Damage");
-  setPanelTitle(els.allProgEchoSoaks, bossLabels.beloren.echo);
-  setPanelTitle(els.allProgQuillSoaks, bossLabels.beloren.quill);
-  setPanelTitle(els.allProgEruptionInterrupts, bossLabels.beloren.interrupts);
-  setPanelTitle(els.allProgConsumables, bossLabels.beloren.consumables);
-  setPanelTitle(els.allProgEggDamage, bossLabels.beloren.eggDamage);
+  setPanelTitle(els.allProgEchoSoaks, labels.echo);
+  setPanelTitle(els.allProgQuillSoaks, labels.quill);
+  setPanelTitle(els.allProgEruptionInterrupts, labels.nightInterrupts || labels.interrupts);
+  setPanelTitle(els.allProgConsumables, labels.consumables);
+  setPanelTitle(els.allProgEggDamage, labels.eggDamage || "Egg Damage");
   els.eggDamage.closest(".panel").classList.toggle("is-hidden", !labels.eggDamage);
+  els.symbolCalls.closest(".panel").classList.toggle("is-hidden", !labels.symbolCalls);
   els.nightEggDamage.closest(".panel").classList.toggle("is-hidden", !labels.eggDamage);
+  els.allProgEggDamage.closest(".panel").classList.toggle("is-hidden", !labels.eggDamage);
   els.consumables.closest(".panel").classList.toggle("is-hidden", bossKey === "lura");
   document.querySelectorAll(".mini-toggle").forEach((toggle) => {
     toggle.classList.toggle("is-hidden", bossKey === "lura");
@@ -491,7 +521,7 @@ function renderAllProgDashboard(allProg) {
   }
 
   els.allProgSummaryGrid.innerHTML = [
-    metric("Reports", allProg.reportCount),
+    reportCountMetric(allProg),
     metric("Attempts", allProg.pullCount),
     metric("Wipes", allProg.wipeCount),
     metric("Combat", formatDurationCompact(allProg.combatDurationMs)),
@@ -556,7 +586,7 @@ function nightCacheKey(reportUrl) {
 }
 
 function allProgCacheKey(reportUrl) {
-  return `${reportUrl}::all-prog`;
+  return `${reportUrl}::${currentBossKey === "lura" ? simpleHash(kickAssignmentsForRequest()) : "default"}::all-prog`;
 }
 
 function kickAssignmentsForRequest() {
@@ -585,6 +615,31 @@ function simpleHash(value) {
 
 function metric(label, value) {
   return `<div class="metric"><span class="metric-label">${escapeHtml(label)}</span><span class="metric-value">${escapeHtml(value)}</span></div>`;
+}
+
+function reportCountMetric(allProg) {
+  const reports = allProg.reports || [];
+  return `<details class="metric metric-details">
+    <summary>
+      <span>
+        <span class="metric-label">Reports</span>
+        <span class="metric-value">${escapeHtml(allProg.reportCount)}</span>
+      </span>
+    </summary>
+    <div class="metric-expanded">
+      ${reports.length ? `<div class="report-list">${reports.map(reportLinkRow).join("")}</div>` : `<p>No cached reports yet.</p>`}
+      <button class="scan-now-button discover-reports-button" type="button">${allProg.discoveredReports ? "Check again" : "Find more reports"}</button>
+    </div>
+  </details>`;
+}
+
+function reportLinkRow(report) {
+  const url = report.url || `https://www.warcraftlogs.com/reports/${encodeURIComponent(report.code)}`;
+  const count = `${formatNumber(report.pullCount || 0)} pulls`;
+  return `<a class="report-row-link" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">
+    <span>${escapeHtml(report.title || report.code)}</span>
+    <span>${escapeHtml(count)}</span>
+  </a>`;
 }
 
 function renderWipeFailures(rows) {
@@ -821,6 +876,84 @@ function renderTerminateTimeline(timeline) {
     ${terminateDeaths.length ? renderTerminateDeathRow(terminateDeaths, windowStart, durationMs) : ""}
     ${extraCasts.length ? renderExtraKickRow(extraCasts, windowStart, durationMs) : ""}
   </div>`;
+}
+
+function renderSymbolCalls(symbols) {
+  const sequences = symbols?.sequences || [];
+  if (symbols?.source === "missing") return empty("No chat log loaded.");
+  if (!sequences.length) return empty("No symbol macro calls detected for this wipe.");
+
+  const selected = sequences.find((sequence) => sequence.id === selectedMemorySequenceId) || sequences[0];
+  selectedMemorySequenceId = selected.id;
+  return `<div class="symbol-sequence-list">
+    ${sequences.length > 1 ? renderMemorySequencePicker(sequences, selected) : ""}
+    ${renderSymbolSequence(selected)}
+  </div>`;
+}
+
+function renderMemorySequencePicker(sequences, selected) {
+  return `<div class="terminate-picker memory-picker">
+    <label for="memory-sequence-select">Sequence</label>
+    <select id="memory-sequence-select" class="memory-sequence-select">
+      ${sequences.map((sequence) => `<option value="${escapeHtml(sequence.id)}"${sequence.id === selected.id ? " selected" : ""}>${sequence.unassigned ? "Unassigned" : `Sequence ${sequence.order}`} - ${formatNumber(sequence.eventCount)} calls / ${formatNumber(sequence.activations?.length || 0)} hits</option>`).join("")}
+    </select>
+  </div>`;
+}
+
+function renderSymbolSequence(sequence) {
+  return `<section class="symbol-sequence${sequence.unassigned ? " is-unassigned" : ""}">
+    <div class="symbol-sequence-head">
+      <strong>${sequence.unassigned ? "Unassigned" : `Sequence ${sequence.order}`}</strong>
+      <span>${escapeHtml(sequence.time)} · ${formatNumber(sequence.eventCount)} calls · ${formatNumber(sequence.activations?.length || 0)} hits</span>
+    </div>
+    <div class="memory-columns">
+      <div>
+        <h3>Callouts</h3>
+    ${
+      sequence.events?.length
+        ? `<ol class="symbol-call-list">${sequence.events.map(renderSymbolCall).join("")}</ol>`
+        : `<div class="symbol-empty">No macro calls found for this sequence.</div>`
+    }
+      </div>
+      <div>
+        <h3>Rune Hits</h3>
+        ${
+          sequence.activations?.length
+            ? `<ol class="memory-activation-list">${sequence.activations.map(renderMemoryActivation).join("")}</ol>`
+            : `<div class="symbol-empty">No Resonance or Dissonance events found.</div>`
+        }
+      </div>
+    </div>
+  </section>`;
+}
+
+function renderSymbolCall(event) {
+  const offset = Number.isFinite(event.offsetMs) ? `+${(event.offsetMs / 1000).toFixed(1)}s` : event.time;
+  return `<li class="symbol-call">
+    <span class="symbol-order">${formatNumber(event.order)}</span>
+    <span class="symbol-player">${escapeHtml(event.player || "Unknown")}</span>
+    ${symbolIcon(event.code)}
+    <span class="symbol-offset">${escapeHtml(offset)}</span>
+  </li>`;
+}
+
+function renderMemoryActivation(event) {
+  const names = (event.players || []).map((item) => item.name).join(", ");
+  const title = names || `${formatNumber(event.playerCount || 0)} players`;
+  return `<li class="memory-activation is-${escapeHtml(event.result)}" title="${escapeHtml(title)}">
+    <span class="symbol-order">${formatNumber(event.order)}</span>
+    <span class="memory-result">${spellIconOnly(event.abilityId, event.abilityName)}</span>
+    <span class="memory-targets">${escapeHtml(names || "No players")}</span>
+    <span class="symbol-offset">${escapeHtml(event.time)}</span>
+  </li>`;
+}
+
+function symbolIcon(code) {
+  const icon = LURA_SYMBOL_ICONS[String(code)];
+  if (!icon) {
+    return `<span class="lura-symbol-icon symbol-unknown" title="${escapeHtml(`Unknown · ${code}`)}" aria-label="Unknown">?</span>`;
+  }
+  return `<img class="lura-symbol-icon" src="${escapeHtml(icon.src)}" alt="${escapeHtml(icon.name)}" title="${escapeHtml(`${icon.name} · ${code}`)}" />`;
 }
 
 function renderTerminateSpawnPicker(spawnSets, selectedSet) {
@@ -1099,6 +1232,15 @@ function spell(abilityId, fallbackName) {
   const iconHtml = icon ? `<img class="spell-icon" src="${icon}" alt="" loading="lazy" />` : "";
   if (!id) return escapeHtml(name);
   return `<a class="spell-link" href="https://www.wowhead.com/spell=${id}" data-wowhead="spell=${id}" target="_blank" rel="noreferrer">${iconHtml}<span>${escapeHtml(name)}</span></a>`;
+}
+
+function spellIconOnly(abilityId, fallbackName) {
+  const id = Number(abilityId || 0);
+  const meta = spellMap[id] || {};
+  const name = meta.name || fallbackName || `Ability ${id}`;
+  const icon = meta.icon ? `https://wow.zamimg.com/images/wow/icons/small/${escapeHtml(meta.icon)}` : "";
+  if (!id || !icon) return `<span class="spell-icon-only spell-icon-fallback" title="${escapeHtml(name)}">?</span>`;
+  return `<a class="spell-icon-only" href="https://www.wowhead.com/spell=${id}" data-wowhead="spell=${id}" title="${escapeHtml(name)}" target="_blank" rel="noreferrer"><img class="spell-icon" src="${icon}" alt="${escapeHtml(name)}" loading="lazy" /></a>`;
 }
 
 function formatNumber(value) {

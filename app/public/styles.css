@@ -296,6 +296,74 @@ h2 {
   padding: 8px 10px;
 }
 
+.metric-details {
+  grid-row: span 2;
+}
+
+.metric-details summary {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  cursor: pointer;
+  list-style: none;
+}
+
+.metric-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.metric-details summary::after {
+  content: ">";
+  color: var(--muted);
+  font-size: 12px;
+  transform: rotate(90deg);
+}
+
+.metric-details[open] summary::after {
+  transform: rotate(-90deg);
+}
+
+.metric-expanded {
+  margin-top: 7px;
+  display: grid;
+  gap: 7px;
+}
+
+.metric-expanded p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.report-list {
+  display: grid;
+  gap: 4px;
+}
+
+.report-row-link {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  color: var(--text);
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.report-row-link span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.report-row-link span:last-child {
+  color: var(--muted);
+}
+
+.report-row-link:hover span:first-child {
+  color: var(--info);
+  text-decoration: underline;
+}
+
 .metric-label {
   display: block;
   color: var(--muted);
@@ -1069,6 +1137,195 @@ td strong {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.symbol-sequence-list {
+  display: grid;
+  gap: 8px;
+}
+
+.symbol-sequence {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-2);
+  padding: 7px;
+}
+
+.symbol-sequence.is-unassigned {
+  border-color: #6b5a26;
+}
+
+.symbol-sequence-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+
+.symbol-sequence-head span {
+  color: var(--muted);
+}
+
+.memory-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.memory-columns h3 {
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.symbol-call-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.memory-activation-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.symbol-empty {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.symbol-call,
+.memory-activation {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) 30px auto;
+  align-items: center;
+  gap: 7px;
+  min-height: 24px;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.memory-activation {
+  grid-template-columns: 22px 28px minmax(0, 1fr) auto;
+  align-items: start;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  padding: 3px 5px 3px 0;
+}
+
+.memory-activation.is-resonance {
+  border-color: #166534;
+  background: #102719;
+}
+
+.memory-activation.is-dissonance {
+  border-color: #7f1d1d;
+  background: #2a1214;
+}
+
+.memory-activation.is-resonance .symbol-order {
+  border-color: #166534;
+  color: #bbf7d0;
+}
+
+.memory-activation.is-dissonance .symbol-order {
+  border-color: #7f1d1d;
+  color: #fecaca;
+}
+
+.memory-result,
+.memory-targets {
+  min-width: 0;
+}
+
+.memory-result {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memory-targets {
+  color: var(--text);
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.spell-icon-only {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+}
+
+.spell-icon-only .spell-icon {
+  width: 22px;
+  height: 22px;
+}
+
+.spell-icon-fallback {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.symbol-order {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--muted);
+}
+
+.symbol-player {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.symbol-offset {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+@media (max-width: 760px) {
+  .memory-columns {
+    grid-template-columns: 1fr;
+  }
+}
+
+.lura-symbol-icon {
+  justify-self: center;
+  width: 26px;
+  height: 26px;
+  object-fit: contain;
+}
+
+.symbol-unknown {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .mistake-list {
