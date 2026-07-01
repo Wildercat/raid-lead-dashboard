@@ -8,6 +8,7 @@
   },
   "scripts": {
     "start": "node app/server.mjs",
-    "test": "node --check app/server.mjs && node --check wcl-beloren-analyze.mjs && node --check wcl-lura-analyze.mjs && node --check app/public/app.js"
+    "chatlog:uploader": "node tools/chatlog-uploader.mjs",
+    "test": "node --check app/server.mjs && node --check wcl-beloren-analyze.mjs && node --check wcl-lura-analyze.mjs && node --check app/public/app.js && node --check tools/chatlog-uploader.mjs"
   }
 }

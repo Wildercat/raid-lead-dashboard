@@ -166,6 +166,19 @@ createServer(async (request, response) => {
       return sendJson(response, 200, result);
     }
 
+    if (request.method === "POST" && request.url === "/api/chat-events") {
+      const body = await readJsonBody(request);
+      if (!body.reportUrl || typeof body.reportUrl !== "string") {
+        return sendJson(response, 400, { error: "reportUrl is required" });
+      }
+
+      const reportCode = reportCodeFromUrl(body.reportUrl);
+      const result = storeUploadedChatEvents(reportCode, Array.isArray(body.events) ? body.events : []);
+      pullResponseCache.clear();
+      nightResponseCache.clear();
+      return sendJson(response, 200, result);
+    }
+
     if (request.method === "GET") {
       return serveStatic(request, response);
     }
@@ -312,6 +325,7 @@ function attachChatLogData(result, report, adapter) {
     report,
     fightId: result.fight.id,
     chatText: readChatLogText(),
+    uploadedEntries: readUploadedChatEvents(report.code),
     memoryActivations: result.latestWipe.memoryActivations || [],
   });
   return result;
@@ -712,12 +726,12 @@ function readChatLogText() {
   }
 }
 
-function buildLuraSymbolMacroSequences({ report, fightId, chatText, memoryActivations = [] }) {
-  if (!chatText) return { source: "missing", sequences: [], eventCount: 0 };
+function buildLuraSymbolMacroSequences({ report, fightId, chatText, uploadedEntries = [], memoryActivations = [] }) {
+  if (!chatText && !uploadedEntries.length) return { source: "missing", sequences: [], eventCount: 0 };
   const fight = report.fights.find((item) => item.id === fightId);
   if (!fight) return { source: "missing_fight", sequences: [], eventCount: 0 };
 
-  const entries = parseWowChatLog(chatText, report.startTime);
+  const entries = dedupeChatEntries([...parseWowChatLog(chatText, report.startTime), ...uploadedEntries]);
   const fightStart = report.startTime + fight.startTime;
   const fightEnd = report.startTime + fight.endTime;
   let severYells = entries
@@ -727,7 +741,7 @@ function buildLuraSymbolMacroSequences({ report, fightId, chatText, memoryActiva
     .filter((entry) => entry.type === "macro" && entry.timestamp >= fightStart - 5000 && entry.timestamp <= fightEnd + 5000)
     .sort((a, b) => a.timestamp - b.timestamp);
   let timeBase = fightStart;
-  let source = "chat_log";
+  let source = uploadedEntries.length && chatText ? "chat_log_and_uploads" : uploadedEntries.length ? "uploads" : "chat_log";
 
   if (!severYells.length && !macroEvents.length) {
     const fallback = chatWindowForFightOrdinal({ report, fight, entries });
@@ -886,6 +900,74 @@ function parseWowChatLog(chatText, reportStartTime) {
   }
 
   return entries.sort((a, b) => a.timestamp - b.timestamp);
+}
+
+function dedupeChatEntries(entries) {
+  return [...new Map(
+    entries
+      .sort((a, b) => a.timestamp - b.timestamp)
+      .map((entry) => [`${entry.type}:${entry.timestamp}:${entry.player || ""}:${entry.code || ""}`, entry]),
+  ).values()];
+}
+
+function storeUploadedChatEvents(reportCode, events) {
+  const current = readUploadedChatEvents(reportCode);
+  const byKey = new Map(current.map((event) => [chatEventKey(event), event]));
+  let accepted = 0;
+
+  for (const event of events) {
+    const normalized = normalizeUploadedChatEvent(event);
+    if (!normalized) continue;
+    byKey.set(chatEventKey(normalized), normalized);
+    accepted += 1;
+  }
+
+  const stored = [...byKey.values()].sort((a, b) => a.timestamp - b.timestamp);
+  writeUploadedChatEvents(reportCode, stored);
+  return { ok: true, accepted, total: stored.length };
+}
+
+function normalizeUploadedChatEvent(event) {
+  const timestamp = Number(event?.timestamp);
+  const fullPlayer = typeof event?.fullPlayer === "string" ? event.fullPlayer.trim() : "";
+  const player = typeof event?.player === "string" && event.player.trim() ? event.player.trim() : fullPlayer.split("-")[0];
+  const callout = typeof event?.callout === "string" ? event.callout.trim() : typeof event?.code === "string" ? event.code.trim() : "";
+  const code = LURA_SYMBOL_CALL_CODES.get(callout.toLowerCase()) || (String(event?.code || "").match(/^\d{5,8}$/) ? String(event.code) : "");
+  if (!Number.isFinite(timestamp) || !player || !code) return null;
+  return {
+    type: "macro",
+    timestamp,
+    fullPlayer: fullPlayer || player,
+    player,
+    code,
+    callout,
+    uploadedAt: new Date().toISOString(),
+  };
+}
+
+function readUploadedChatEvents(reportCode) {
+  const file = uploadedChatEventsPath(reportCode);
+  if (!existsSync(file)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8"));
+    return Array.isArray(parsed.events) ? parsed.events.filter((event) => event?.type === "macro") : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeUploadedChatEvents(reportCode, events) {
+  const dir = join(DATA_CACHE_ROOT, "chat-events");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(uploadedChatEventsPath(reportCode), JSON.stringify({ reportCode, events }, null, 2));
+}
+
+function uploadedChatEventsPath(reportCode) {
+  return join(DATA_CACHE_ROOT, "chat-events", `${String(reportCode).replace(/[^A-Za-z0-9_-]/g, "")}.json`);
+}
+
+function chatEventKey(event) {
+  return `${event.timestamp}:${event.player}:${event.code}`;
 }
 
 function loadReportStores() {
