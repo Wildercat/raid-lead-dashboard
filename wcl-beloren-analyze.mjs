@@ -1590,7 +1590,7 @@ export async function fetchBelorenReportShell(reportUrl = REPORT_URL) {
   };
 }
 
-export async function fetchGuildBelorenReportSummaries({ guildID, difficulty, limit = 20, maxPages = 20 }) {
+export async function fetchGuildBossReportSummaries({ guildID, difficulty, encounterID, limit = 20, maxPages = 20 }) {
   const token = await getAccessToken();
   const reports = [];
   let page = 1;
@@ -1608,7 +1608,7 @@ export async function fetchGuildBelorenReportSummaries({ guildID, difficulty, li
     .filter((report) =>
       report.fights?.some(
         (fight) =>
-          fight.encounterID === BELOREN_ENCOUNTER_ID &&
+          fight.encounterID === encounterID &&
           fight.kill === false &&
           (difficulty === undefined || difficulty === null || fight.difficulty === difficulty),
       ),
@@ -1618,19 +1618,23 @@ export async function fetchGuildBelorenReportSummaries({ guildID, difficulty, li
       title: report.title,
       startTime: report.startTime,
       endTime: report.endTime,
-      belorenFightCount: report.fights.filter(
+      bossFightCount: report.fights.filter(
         (fight) =>
-          fight.encounterID === BELOREN_ENCOUNTER_ID &&
+          fight.encounterID === encounterID &&
           (difficulty === undefined || difficulty === null || fight.difficulty === difficulty),
       ).length,
-      belorenWipeCount: report.fights.filter(
+      bossWipeCount: report.fights.filter(
         (fight) =>
-          fight.encounterID === BELOREN_ENCOUNTER_ID &&
+          fight.encounterID === encounterID &&
           fight.kill === false &&
           (difficulty === undefined || difficulty === null || fight.difficulty === difficulty),
       ).length,
     }))
     .sort((a, b) => b.startTime - a.startTime);
+}
+
+export async function fetchGuildBelorenReportSummaries(options) {
+  return fetchGuildBossReportSummaries({ ...options, encounterID: BELOREN_ENCOUNTER_ID });
 }
 
 export async function fetchBelorenReportData(reportUrl = REPORT_URL) {

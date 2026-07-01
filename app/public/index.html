@@ -12,8 +12,8 @@
     <main class="shell">
       <section class="topbar" aria-label="Report input">
         <div>
-          <h1>Belo'ren Review</h1>
-          <p id="subtitle">Evidence-first Warcraft Logs triage</p>
+          <h1>Raid Lead Dashboard</h1>
+          <p id="subtitle">At-a-glance wipe analysis</p>
         </div>
         <form id="report-form" class="report-form">
           <input
@@ -91,6 +91,22 @@
 
             <section class="panel">
               <header class="panel-header">
+                <h2>Eruption Interrupts</h2>
+                <span id="interrupt-count" class="count">0</span>
+              </header>
+              <div id="eruption-interrupts"></div>
+            </section>
+
+            <section class="panel">
+              <header class="panel-header">
+                <h2>Memory Game</h2>
+                <span id="symbol-call-count" class="count">0</span>
+              </header>
+              <div id="symbol-calls"></div>
+            </section>
+
+            <section class="panel">
+              <header class="panel-header">
                 <div>
                   <h2>Correct Radiant Echoes Soaks</h2>
                   <label class="mini-toggle">
@@ -109,14 +125,6 @@
                 <span id="quill-count" class="count">0</span>
               </header>
               <div id="quill-soaks"></div>
-            </section>
-
-            <section class="panel">
-              <header class="panel-header">
-                <h2>Eruption Interrupts</h2>
-                <span id="interrupt-count" class="count">0</span>
-              </header>
-              <div id="eruption-interrupts"></div>
             </section>
 
             <section class="panel">

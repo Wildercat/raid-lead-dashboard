@@ -1,6 +1,6 @@
-# Belo'ren Raid Dashboard
+# Raid Lead Dashboard
 
-Warcraft Logs triage dashboard for Belo'ren. The app accepts a report URL, analyzes boss wipes, and gives raid leads compact views for the latest wipe, the whole night, and all cached progression for the supported guild.
+Warcraft Logs triage dashboard for supported March on Quel'Danas bosses. The app accepts a report URL, analyzes boss wipes, and gives raid leads compact views for the latest wipe, the whole night, and all cached progression for supported guilds.
 
 ## Changelog
 
@@ -35,6 +35,22 @@ npm start
 ```
 
 The app listens on `PORT` when set, otherwise `4173`.
+
+## Chat Log Uploader
+
+The L'ura Memory Game panel can use local WoW chat log callouts. The uploader tails `WoWChatLog.txt`, parses only matching symbol callouts, and posts those normalized events to the dashboard server.
+
+```bash
+npm run chatlog:uploader -- --report-url https://www.warcraftlogs.com/reports/REPORT_CODE
+```
+
+Optional flags:
+
+```bash
+--server http://localhost:4173
+--file "C:\Program Files (x86)\World of Warcraft\_retail_\Logs\WoWChatLog.txt"
+--from-start
+```
 
 ## Deploy
 
