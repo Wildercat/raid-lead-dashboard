@@ -727,7 +727,6 @@ function readChatLogText() {
 }
 
 function buildLuraSymbolMacroSequences({ report, fightId, chatText, uploadedEntries = [], memoryActivations = [] }) {
-  if (!chatText && !uploadedEntries.length) return { source: "missing", sequences: [], eventCount: 0 };
   const fight = report.fights.find((item) => item.id === fightId);
   if (!fight) return { source: "missing_fight", sequences: [], eventCount: 0 };
 
@@ -741,7 +740,7 @@ function buildLuraSymbolMacroSequences({ report, fightId, chatText, uploadedEntr
     .filter((entry) => entry.type === "macro" && entry.timestamp >= fightStart - 5000 && entry.timestamp <= fightEnd + 5000)
     .sort((a, b) => a.timestamp - b.timestamp);
   let timeBase = fightStart;
-  let source = uploadedEntries.length && chatText ? "chat_log_and_uploads" : uploadedEntries.length ? "uploads" : "chat_log";
+  let source = uploadedEntries.length && chatText ? "chat_log_and_uploads" : uploadedEntries.length ? "uploads" : chatText ? "chat_log" : "wcl_only";
 
   if (!severYells.length && !macroEvents.length) {
     const fallback = chatWindowForFightOrdinal({ report, fight, entries });
@@ -759,9 +758,11 @@ function buildLuraSymbolMacroSequences({ report, fightId, chatText, uploadedEntr
 
   const activationGroups = groupMemoryActivationsBySequence(memoryActivations);
   const sequenceCount = Math.max(severYells.length, activationGroups.length);
+  if (!sequenceCount) return { source: chatText || uploadedEntries.length ? source : "missing", sequences: [], eventCount: 0 };
+
   const sequences = Array.from({ length: sequenceCount }, (_, index) => {
     const sever = severYells[index] || {
-      timestamp: memoryActivations[index]?.timestamp || fightStart,
+      timestamp: activationGroups[index]?.[0]?.timestamp || fightStart,
     };
     const nextSever = severYells[index + 1]?.timestamp || fightEnd + 5000;
     const windowEnd = Math.min(nextSever, sever.timestamp + 18000);

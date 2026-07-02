@@ -880,7 +880,7 @@ function renderTerminateTimeline(timeline) {
 
 function renderSymbolCalls(symbols) {
   const sequences = symbols?.sequences || [];
-  if (symbols?.source === "missing") return empty("No chat log loaded.");
+  if (symbols?.source === "missing" && !sequences.length) return empty("No rune events detected for this wipe.");
   if (!sequences.length) return empty("No symbol macro calls detected for this wipe.");
 
   const selected = sequences.find((sequence) => sequence.id === selectedMemorySequenceId) || sequences[0];
@@ -912,7 +912,7 @@ function renderSymbolSequence(sequence) {
     ${
       sequence.events?.length
         ? `<ol class="symbol-call-list">${sequence.events.map(renderSymbolCall).join("")}</ol>`
-        : `<div class="symbol-empty">No macro calls found for this sequence.</div>`
+        : `<div class="symbol-empty">No chat log callouts available.</div>`
     }
       </div>
       <div>
