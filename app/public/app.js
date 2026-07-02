@@ -404,7 +404,7 @@ function renderDashboard(data) {
   els.soakCount.textContent = latest.correctEchoSoakLeaderboard.length;
   els.quillCount.textContent = latest.correctQuillSoakLeaderboard.length;
   els.interruptCount.textContent = currentBossKey === "lura" ? latest.interruptTimeline?.eventCount || 0 : latest.eruptionInterruptLeaderboard.length;
-  els.symbolCallCount.textContent = latest.symbolMacroSequences?.eventCount || 0;
+  els.symbolCallCount.textContent = memoryGameHitCount(latest.symbolMacroSequences);
   els.eggDamageCount.textContent = latest.eggDamageLeaderboard.length;
   els.consumableCount.textContent = latest.consumableLeaderboard.length;
 
@@ -881,7 +881,7 @@ function renderTerminateTimeline(timeline) {
 function renderSymbolCalls(symbols) {
   const sequences = symbols?.sequences || [];
   if (symbols?.source === "missing" && !sequences.length) return empty("No rune events detected for this wipe.");
-  if (!sequences.length) return empty("No symbol macro calls detected for this wipe.");
+  if (!sequences.length) return empty("No rune events detected for this wipe.");
 
   const selected = sequences.find((sequence) => sequence.id === selectedMemorySequenceId) || sequences[0];
   selectedMemorySequenceId = selected.id;
@@ -895,7 +895,7 @@ function renderMemorySequencePicker(sequences, selected) {
   return `<div class="terminate-picker memory-picker">
     <label for="memory-sequence-select">Sequence</label>
     <select id="memory-sequence-select" class="memory-sequence-select">
-      ${sequences.map((sequence) => `<option value="${escapeHtml(sequence.id)}"${sequence.id === selected.id ? " selected" : ""}>${sequence.unassigned ? "Unassigned" : `Sequence ${sequence.order}`} - ${formatNumber(sequence.eventCount)} calls / ${formatNumber(sequence.activations?.length || 0)} hits</option>`).join("")}
+      ${sequences.map((sequence) => `<option value="${escapeHtml(sequence.id)}"${sequence.id === selected.id ? " selected" : ""}>${sequence.unassigned ? "Unassigned" : `Sequence ${sequence.order}`} - ${formatNumber(sequence.activations?.length || 0)} hits / ${formatNumber(sequence.eventCount)} calls</option>`).join("")}
     </select>
   </div>`;
 }
@@ -946,6 +946,10 @@ function renderMemoryActivation(event) {
     <span class="memory-targets">${escapeHtml(names || "No players")}</span>
     <span class="symbol-offset">${escapeHtml(event.time)}</span>
   </li>`;
+}
+
+function memoryGameHitCount(symbols) {
+  return (symbols?.sequences || []).reduce((total, sequence) => total + (sequence.activations?.length || 0), 0);
 }
 
 function symbolIcon(code) {
