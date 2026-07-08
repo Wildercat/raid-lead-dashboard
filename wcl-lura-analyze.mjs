@@ -836,11 +836,13 @@ function buildMarkerAssignedGroups({ fight, actorById, deaths, events, kickAssig
   const groups = markerEventGroups(events);
   const assignedLineByGroup = matchAssignmentLines(groups, kickAssignments, actorById);
   return groups.map((group, index) => {
-    const assignedNames = assignedLineByGroup.get(index) || [];
+    const assignedNames = assignedLineByGroup.get(index) || assumedAssignedNames(actorById, group.events);
+    const assumed = !assignedLineByGroup.has(index) && assignedNames.length > 0;
     return {
       id: group.targetKey,
       label: group.targetName,
       targetMarker: group.targetMarker,
+      assumed,
       assignedNames,
       assignedPlayers: assignedNames.map((name, playerIndex) => {
         const playerEvent = group.events.find((event) => namesMatch(actorName(actorById, resolvePlayerActorId(actorById, event.sourceID)), name));
@@ -849,6 +851,16 @@ function buildMarkerAssignedGroups({ fight, actorById, deaths, events, kickAssig
       }),
     };
   });
+}
+
+function assumedAssignedNames(actorById, events) {
+  const names = [];
+  for (const event of events.slice().sort((a, b) => a.timestamp - b.timestamp)) {
+    const name = actorName(actorById, resolvePlayerActorId(actorById, event.sourceID));
+    if (!names.some((item) => namesMatch(item, name))) names.push(name);
+    if (names.length >= 4) break;
+  }
+  return names;
 }
 
 function buildUnifiedKickEvents({ fight, actorById, events, assignedGroups }) {

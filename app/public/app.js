@@ -972,7 +972,7 @@ function renderTerminateSpawnPicker(spawnSets, selectedSet) {
 function renderAssignedGroups(groups) {
   if (!groups.length) return "";
   return `<div class="assigned-group-list">
-    ${groups.map((group) => `<div class="assigned-group"><strong>${escapeHtml(group.label)}</strong><div class="assigned-kicks">${(group.assignedPlayers || []).map(renderAssignedKick).join("")}</div></div>`).join("")}
+    ${groups.map((group) => `<div class="assigned-group"><strong>${escapeHtml(group.label)}${group.assumed ? " <span>(assumed)</span>" : ""}</strong><div class="assigned-kicks">${(group.assignedPlayers || []).map(renderAssignedKick).join("")}</div></div>`).join("")}
   </div>`;
 }
 
