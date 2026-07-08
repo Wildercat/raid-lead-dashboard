@@ -1095,6 +1095,12 @@ td strong {
   background: #2a2115;
 }
 
+.kick-marker.is-marked-mismatch {
+  border-color: #ef4444;
+  background: #3a1216;
+  box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.45);
+}
+
 .kick-marker.extra {
   border-color: #614b78;
   background: #241c2e;

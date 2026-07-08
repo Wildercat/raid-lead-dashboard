@@ -1054,8 +1054,9 @@ function renderKickMarker(event) {
   const lane = event.lane || 0;
   const expected = event.expectedName ? `${event.assignmentGroup || ""} #${event.order}: expected ${event.expectedName}` : event.status === "extra" ? "No successful interrupt" : "Unassigned";
   const target = event.assignmentGroup && event.assignmentGroup !== "Unassigned" ? ` on ${event.assignmentGroup}` : "";
-  const title = `${event.time} ${event.player?.name || ""}${target} - ${expected}`;
-  return `<span class="kick-marker ${escapeHtml(event.status)}" style="left:${left}%; top:${4 + lane * 18}px" title="${escapeHtml(title)}">
+  const markedMismatch = event.targetMarker && event.status === "out_of_order";
+  const title = `${event.time} ${event.player?.name || ""}${target} - ${markedMismatch ? "wrong marked-target kick, " : ""}${expected}`;
+  return `<span class="kick-marker ${escapeHtml(event.status)}${markedMismatch ? " is-marked-mismatch" : ""}" style="left:${left}%; top:${4 + lane * 18}px" title="${escapeHtml(title)}">
     <span class="kick-time">${escapeHtml(event.time)}</span>
     <span class="kick-player">${player(event.player)}</span>
     <span class="kick-order">${event.order ? `#${formatNumber(event.order)}` : ""}</span>
