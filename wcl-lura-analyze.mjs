@@ -833,7 +833,7 @@ function buildAssignedGroups({ fight, actorById, deaths, events, kickAssignments
 
 function buildMarkerAssignedGroups({ fight, actorById, deaths, events, kickAssignments, spawnEndTimestamp }) {
   const deathByName = deathByNormalizedName({ fight, actorById, deaths });
-  const groups = markerEventGroups(events);
+  const groups = markerEventGroups(events, actorById, kickAssignments);
   const assignedLineByGroup = matchAssignmentLines(groups, kickAssignments, actorById);
   return groups.map((group, index) => {
     const assignedNames = assignedLineByGroup.get(index) || assumedAssignedNames(actorById, group.events);
@@ -931,7 +931,7 @@ function buildMarkerKickEvents({ fight, actorById, events, assignedGroups }) {
   });
 }
 
-function markerEventGroups(events) {
+function markerEventGroups(events, actorById, kickAssignments) {
   const groups = new Map();
   for (const event of events.filter((item) => item.targetMarker)) {
     const key = markerTargetKey(event);
@@ -947,7 +947,7 @@ function markerEventGroups(events) {
     groups.get(key).events.push(event);
   }
 
-  const usedSetters = attachMarkerSettingKicks([...groups.values()], events.filter((item) => !item.targetMarker));
+  const usedSetters = attachMarkerSettingKicks([...groups.values()], events.filter((item) => !item.targetMarker), actorById, kickAssignments);
   const unmarkedEvents = events.filter((item) => !item.targetMarker && !usedSetters.has(item));
   if (unmarkedEvents.length) {
     groups.set("marker-unmarked", {
@@ -961,8 +961,26 @@ function markerEventGroups(events) {
   return [...groups.values()].sort((a, b) => markerSortValue(a.targetMarker) - markerSortValue(b.targetMarker));
 }
 
-function attachMarkerSettingKicks(groups, unmarkedEvents) {
+function attachMarkerSettingKicks(groups, unmarkedEvents, actorById, kickAssignments) {
   const used = new Set();
+  for (const event of unmarkedEvents) {
+    const actualName = actorName(actorById, resolvePlayerActorId(actorById, event.sourceID));
+    const assignedLine = kickAssignments.find((line) => line.some((name) => namesMatch(name, actualName)));
+    if (!assignedLine) continue;
+    const group = groups.find((item) =>
+      item.targetMarker &&
+      item.events.some((markedEvent) => {
+        const markedName = actorName(actorById, resolvePlayerActorId(actorById, markedEvent.sourceID));
+        return assignedLine.some((name) => namesMatch(name, markedName));
+      }),
+    );
+    if (!group) continue;
+    event.assumedMarkerSetter = true;
+    group.events.push(event);
+    group.events.sort((a, b) => a.timestamp - b.timestamp);
+    used.add(event);
+  }
+
   for (const group of groups
     .filter((item) => item.targetMarker)
     .sort((a, b) => firstTimestamp(a.events) - firstTimestamp(b.events))) {
