@@ -901,10 +901,10 @@ function buildMarkerKickEvents({ fight, actorById, events, assignedGroups }) {
   const orderByGroup = new Map(assignedGroups.map((group) => [group.id, 0]));
   return events.map((event) => {
     const sourceID = resolvePlayerActorId(actorById, event.sourceID);
-    const group = assignedGroups.find((item) => item.id === markerTargetKey(event)) || null;
+    const actualName = actorName(actorById, sourceID);
+    const group = markerKickGroup(event, assignedGroups, actualName) || null;
     const groupOrder = group ? (orderByGroup.get(group.id) || 0) : 0;
     const expectedName = group?.assignedNames[groupOrder] || null;
-    const actualName = actorName(actorById, sourceID);
     const status = expectedName ? (namesMatch(actualName, expectedName) ? "on_order" : "out_of_order") : "unassigned";
     if (group) orderByGroup.set(group.id, groupOrder + 1);
     return {
@@ -933,7 +933,7 @@ function buildMarkerKickEvents({ fight, actorById, events, assignedGroups }) {
 
 function markerEventGroups(events) {
   const groups = new Map();
-  for (const event of events) {
+  for (const event of events.filter((item) => item.targetMarker)) {
     const key = markerTargetKey(event);
     const targetMarker = Number.isFinite(Number(event.targetMarker)) ? Number(event.targetMarker) : null;
     if (!groups.has(key)) {
@@ -946,7 +946,50 @@ function markerEventGroups(events) {
     }
     groups.get(key).events.push(event);
   }
+
+  const usedSetters = attachMarkerSettingKicks([...groups.values()], events.filter((item) => !item.targetMarker));
+  const unmarkedEvents = events.filter((item) => !item.targetMarker && !usedSetters.has(item));
+  if (unmarkedEvents.length) {
+    groups.set("marker-unmarked", {
+      targetKey: "marker-unmarked",
+      targetName: "Unmarked",
+      targetMarker: null,
+      events: unmarkedEvents,
+    });
+  }
+
   return [...groups.values()].sort((a, b) => markerSortValue(a.targetMarker) - markerSortValue(b.targetMarker));
+}
+
+function attachMarkerSettingKicks(groups, unmarkedEvents) {
+  const used = new Set();
+  for (const group of groups
+    .filter((item) => item.targetMarker)
+    .sort((a, b) => firstTimestamp(a.events) - firstTimestamp(b.events))) {
+    const firstMarkedKick = firstTimestamp(group.events);
+    const setter = unmarkedEvents
+      .filter((event) => !used.has(event))
+      .filter((event) => event.timestamp <= firstMarkedKick && firstMarkedKick - event.timestamp <= 2500)
+      .sort((a, b) => b.timestamp - a.timestamp)[0];
+    if (!setter) continue;
+    setter.assumedMarkerSetter = true;
+    group.events.push(setter);
+    group.events.sort((a, b) => a.timestamp - b.timestamp);
+    used.add(setter);
+  }
+  return used;
+}
+
+function markerKickGroup(event, assignedGroups, actualName) {
+  const markerGroup = event.targetMarker ? assignedGroups.find((item) => item.id === markerTargetKey(event)) : null;
+  if (markerGroup) return markerGroup;
+  const namedGroups = assignedGroups.filter((item) => item.assignedNames.some((name) => namesMatch(name, actualName)));
+  if (namedGroups.length === 1) return namedGroups[0];
+  return assignedGroups.find((item) => item.id === markerTargetKey(event)) || null;
+}
+
+function firstTimestamp(events) {
+  return Math.min(...events.map((event) => event.timestamp));
 }
 
 function markerTargetKey(event) {
