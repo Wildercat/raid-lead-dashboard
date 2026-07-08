@@ -39,6 +39,16 @@ const RESONANCE_IDS = new Set([SPELLS.resonance]);
 const DISSONANCE_IDS = new Set([SPELLS.dissonanceA, SPELLS.dissonanceB]);
 const GLAIVE_IDS = new Set([SPELLS.heavensGlaivesA, SPELLS.heavensGlaivesB]);
 const QUASAR_IDS = new Set([SPELLS.darkQuasarA, SPELLS.darkQuasarB]);
+const RAID_MARKERS = new Map([
+  [1, "Star"],
+  [2, "Circle"],
+  [3, "Diamond"],
+  [4, "Triangle"],
+  [5, "Moon"],
+  [6, "Square"],
+  [7, "Cross"],
+  [8, "Skull"],
+]);
 const WIPE_DAMAGE_IDS = new Set([
   ...TERMINATE_IDS,
   ...DISSONANCE_IDS,
@@ -716,6 +726,7 @@ function buildInterruptTimeline({ fight, actorById, casts, interrupts, deaths, k
         status: "extra",
         targetName: event.targetID ? actorName(actorById, event.targetID) : "No interrupt",
         targetInstance: event.targetInstance || null,
+        targetMarker: event.targetMarker || null,
         abilityId: abilityIdOf(event),
         abilityName: ABILITY_NAMES[abilityIdOf(event)] || event.ability?.name || `Ability ${abilityIdOf(event)}`,
         extraAbilityId: null,
@@ -761,8 +772,13 @@ function buildTerminateSpawnSets({ fight, actorById, successful, extraCasts, dea
       const endTimestamp = Math.max(cluster.events.at(-1)?.timestamp || 0, ...(cluster.missedFailures || []).map((failure) => failure.timestamp), startTimestamp);
       const clusteredExtras = extraCasts.filter((event) => event.timestamp >= startTimestamp - 2500 && event.timestamp <= endTimestamp + 2500);
       const clusteredDeaths = terminateDeaths.filter((event) => event.timestamp >= startTimestamp - 2500 && event.timestamp <= endTimestamp + 2500);
-      const assignedGroups = buildAssignedGroups({ fight, actorById, deaths, events: cluster.events, kickAssignments, spawnEndTimestamp: endTimestamp });
-      const timelineEvents = buildUnifiedKickEvents({ fight, actorById, events: cluster.events, assignedGroups });
+      const markerAware = cluster.events.some((event) => event.targetMarker);
+      const assignedGroups = markerAware
+        ? buildMarkerAssignedGroups({ fight, actorById, deaths, events: cluster.events, kickAssignments, spawnEndTimestamp: endTimestamp })
+        : buildAssignedGroups({ fight, actorById, deaths, events: cluster.events, kickAssignments, spawnEndTimestamp: endTimestamp });
+      const timelineEvents = markerAware
+        ? buildMarkerKickEvents({ fight, actorById, events: cluster.events, assignedGroups })
+        : buildUnifiedKickEvents({ fight, actorById, events: cluster.events, assignedGroups });
 
       return {
         id: `spawn-${index + 1}`,
@@ -815,6 +831,26 @@ function buildAssignedGroups({ fight, actorById, deaths, events, kickAssignments
   }));
 }
 
+function buildMarkerAssignedGroups({ fight, actorById, deaths, events, kickAssignments, spawnEndTimestamp }) {
+  const deathByName = deathByNormalizedName({ fight, actorById, deaths });
+  const groups = markerEventGroups(events);
+  const assignedLineByGroup = matchAssignmentLines(groups, kickAssignments, actorById);
+  return groups.map((group, index) => {
+    const assignedNames = assignedLineByGroup.get(index) || [];
+    return {
+      id: group.targetKey,
+      label: group.targetName,
+      targetMarker: group.targetMarker,
+      assignedNames,
+      assignedPlayers: assignedNames.map((name, playerIndex) => {
+        const playerEvent = group.events.find((event) => namesMatch(actorName(actorById, resolvePlayerActorId(actorById, event.sourceID)), name));
+        const checkTimestamp = playerEvent?.timestamp || group.events[playerIndex]?.timestamp || spawnEndTimestamp;
+        return assignedPlayerStatus(name, deathByName, checkTimestamp);
+      }),
+    };
+  });
+}
+
 function buildUnifiedKickEvents({ fight, actorById, events, assignedGroups }) {
   const orderByGroup = new Map(assignedGroups.map((group) => [group.id, 0]));
   return events.map((event) => {
@@ -840,12 +876,77 @@ function buildUnifiedKickEvents({ fight, actorById, events, assignedGroups }) {
       status,
       targetName: actorName(actorById, event.targetID),
       targetInstance: event.targetInstance || null,
+      targetMarker: event.targetMarker || null,
       abilityId: abilityIdOf(event),
       abilityName: ABILITY_NAMES[abilityIdOf(event)] || `Ability ${abilityIdOf(event)}`,
       extraAbilityId: event.extraAbilityGameID,
       extraAbilityName: ABILITY_NAMES[event.extraAbilityGameID] || "Terminate",
     };
   });
+}
+
+function buildMarkerKickEvents({ fight, actorById, events, assignedGroups }) {
+  const orderByGroup = new Map(assignedGroups.map((group) => [group.id, 0]));
+  return events.map((event) => {
+    const sourceID = resolvePlayerActorId(actorById, event.sourceID);
+    const group = assignedGroups.find((item) => item.id === markerTargetKey(event)) || null;
+    const groupOrder = group ? (orderByGroup.get(group.id) || 0) : 0;
+    const expectedName = group?.assignedNames[groupOrder] || null;
+    const actualName = actorName(actorById, sourceID);
+    const status = expectedName ? (namesMatch(actualName, expectedName) ? "on_order" : "out_of_order") : "unassigned";
+    if (group) orderByGroup.set(group.id, groupOrder + 1);
+    return {
+      id: `kick-${event.timestamp}-${sourceID}`,
+      type: "interrupt",
+      timestamp: event.timestamp,
+      time: formatTime(event.timestamp - fight.startTime),
+      offsetMs: event.timestamp - fight.startTime,
+      sourceID,
+      actualName,
+      player: actorMeta(actorById, sourceID),
+      assignmentGroup: group?.label || "Other",
+      expectedName,
+      order: group ? groupOrder + 1 : null,
+      status,
+      targetName: actorName(actorById, event.targetID),
+      targetInstance: event.targetInstance || null,
+      targetMarker: event.targetMarker || null,
+      abilityId: abilityIdOf(event),
+      abilityName: ABILITY_NAMES[abilityIdOf(event)] || `Ability ${abilityIdOf(event)}`,
+      extraAbilityId: event.extraAbilityGameID,
+      extraAbilityName: ABILITY_NAMES[event.extraAbilityGameID] || "Terminate",
+    };
+  });
+}
+
+function markerEventGroups(events) {
+  const groups = new Map();
+  for (const event of events) {
+    const key = markerTargetKey(event);
+    const targetMarker = Number.isFinite(Number(event.targetMarker)) ? Number(event.targetMarker) : null;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        targetKey: key,
+        targetName: targetMarkerLabel(targetMarker),
+        targetMarker,
+        events: [],
+      });
+    }
+    groups.get(key).events.push(event);
+  }
+  return [...groups.values()].sort((a, b) => markerSortValue(a.targetMarker) - markerSortValue(b.targetMarker));
+}
+
+function markerTargetKey(event) {
+  return Number.isFinite(Number(event.targetMarker)) ? `marker-${Number(event.targetMarker)}` : "marker-unmarked";
+}
+
+function targetMarkerLabel(marker) {
+  return marker ? RAID_MARKERS.get(marker) || `Marker ${marker}` : "Unmarked";
+}
+
+function markerSortValue(marker) {
+  return marker || 99;
 }
 
 function deathByNormalizedName({ fight, actorById, deaths }) {
@@ -911,7 +1012,7 @@ function matchAssignmentLines(groups, kickAssignments, actorById) {
     });
   });
 
-  for (const item of scored.sort((a, b) => b.score - a.score)) {
+  for (const item of scored.filter((item) => item.score > 0).sort((a, b) => b.score - a.score)) {
     if (assignmentByGroup.has(item.groupIndex) || !available.has(item.lineIndex)) continue;
     assignmentByGroup.set(item.groupIndex, kickAssignments[item.lineIndex]);
     available.delete(item.lineIndex);

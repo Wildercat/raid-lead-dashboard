@@ -20,6 +20,10 @@ const STORE_VERSION = 15;
 const ENCOUNTER_ID_BELOREN = 3182;
 const ALLOWED_ALL_PROG_GUILD_IDS = new Set([811453, 713862]);
 const SHARED_SCAN_WCL_INTERVAL_MS = 5000;
+const MAX_PULL_RESPONSE_CACHE_ENTRIES = 60;
+const MAX_NIGHT_RESPONSE_CACHE_ENTRIES = 12;
+const MAX_REPORT_STORE_CACHE_ENTRIES = 6;
+const MAX_STORED_PULL_DETAILS = 30;
 const reportStoreCache = new Map();
 const reportBuilds = new Map();
 const reportScans = new Map();
@@ -200,7 +204,7 @@ async function getStoredReportDashboard(reportUrl, { fresh = false, kickAssignme
   if (!fresh) {
     const diskStore = readReportStoreFromDisk(storeKey);
     if (diskStore) {
-      reportStoreCache.set(storeKey, diskStore);
+      setBoundedCache(reportStoreCache, storeKey, diskStore, MAX_REPORT_STORE_CACHE_ENTRIES);
       return diskStore;
     }
   }
@@ -208,7 +212,7 @@ async function getStoredReportDashboard(reportUrl, { fresh = false, kickAssignme
   if (fresh) {
     const currentStore = memoryStore || readReportStoreFromDisk(storeKey);
     if (currentStore) {
-      reportStoreCache.set(storeKey, currentStore);
+      setBoundedCache(reportStoreCache, storeKey, currentStore, MAX_REPORT_STORE_CACHE_ENTRIES);
       const shell = await fetchBelorenReportShell(reportUrl);
       if (
         currentStore.wholeNight &&
@@ -223,7 +227,7 @@ async function getStoredReportDashboard(reportUrl, { fresh = false, kickAssignme
 
   const buildPromise = buildReportDashboardStore(reportUrl, { kickAssignments })
     .then((store) => {
-      reportStoreCache.set(storeKey, store);
+      setBoundedCache(reportStoreCache, storeKey, store, MAX_REPORT_STORE_CACHE_ENTRIES);
       writeReportStoreToDisk(storeKey, store);
       return store;
     })
@@ -282,8 +286,8 @@ async function getPullDashboardResponse(reportUrl, { pullId = "latest", fresh = 
   });
   normalizeBossResponse(result, context.adapter, reportUrl);
   attachChatLogData(result, context.shell.report, context.adapter);
-  pullResponseCache.set(cacheKey, result);
-  pullResponseCache.set(fightCacheKey, result);
+  setBoundedCache(pullResponseCache, cacheKey, result, MAX_PULL_RESPONSE_CACHE_ENTRIES);
+  setBoundedCache(pullResponseCache, fightCacheKey, result, MAX_PULL_RESPONSE_CACHE_ENTRIES);
   return result;
 }
 
@@ -295,7 +299,7 @@ async function getNightDashboardResponse(reportUrl, { fresh = false, kickAssignm
     const cachedSummary = readNightSummaryFromDisk(context.cacheKey);
     if (cachedSummary) {
       const response = responseFromNightSummary(cachedSummary);
-      nightResponseCache.set(context.cacheKey, response);
+      setBoundedCache(nightResponseCache, context.cacheKey, response, MAX_NIGHT_RESPONSE_CACHE_ENTRIES);
       return response;
     }
   }
@@ -308,7 +312,7 @@ async function getNightDashboardResponse(reportUrl, { fresh = false, kickAssignm
   });
   normalizeBossResponse(result, context.adapter, reportUrl);
   attachChatLogData(result, context.shell.report, context.adapter);
-  nightResponseCache.set(context.cacheKey, result);
+  setBoundedCache(nightResponseCache, context.cacheKey, result, MAX_NIGHT_RESPONSE_CACHE_ENTRIES);
   writeNightSummaryToDisk(context.cacheKey, nightSummaryFromResponse(reportUrl, result, context));
   return result;
 }
@@ -335,7 +339,8 @@ async function rebuildReportDashboardStore(reportUrl, { kickAssignments = "" } =
   const reportCode = reportCodeFromUrl(reportUrl);
   const storeKey = reportStoreKey(reportCode, kickAssignments);
   const store = await buildReportDashboardStore(reportUrl, { kickAssignments });
-  reportStoreCache.set(storeKey, store);
+  pruneStoredPullDetails(store);
+  setBoundedCache(reportStoreCache, storeKey, store, MAX_REPORT_STORE_CACHE_ENTRIES);
   writeReportStoreToDisk(storeKey, store);
   return store;
 }
@@ -348,7 +353,7 @@ async function buildReportDashboardStore(reportUrl, { kickAssignments = "" } = {
   const nightOutput = adapter.analyzeData(rawData, { reportUrl, scope: "night", ...analysisOptions });
   const pulls = {};
 
-  for (const pull of nightOutput.report.pulls) {
+  for (const pull of nightOutput.report.pulls.slice(0, MAX_STORED_PULL_DETAILS)) {
     const pullOutput = adapter.analyzeData(rawData, {
       reportUrl,
       pullId: String(pull.id),
@@ -369,6 +374,7 @@ async function buildReportDashboardStore(reportUrl, { kickAssignments = "" } = {
     kind: "beloren-dashboard-store",
     reportCode: rawData.reportCode,
     reportUrl,
+    configHash: configHashForAdapter(adapter, { kickAssignments }),
     fetchedAt: new Date().toISOString(),
     boss: {
       key: adapter.key,
@@ -495,7 +501,9 @@ async function appendNewBossFightsToStore(store, report, { kickAssignments = "" 
   store.wholeNightFetchedEventCounts = {};
 
   const storeKey = reportStoreKey(store.reportCode, kickAssignments);
-  reportStoreCache.set(storeKey, store);
+  pruneStoredPullDetails(store);
+  clearResponseCachesForStore(store);
+  setBoundedCache(reportStoreCache, storeKey, store, MAX_REPORT_STORE_CACHE_ENTRIES);
   writeReportStoreToDisk(storeKey, store);
   return newFights.map((fight) => fight.id);
 }
@@ -1057,6 +1065,34 @@ function playerMergeKey(player) {
 
 function sum(items, valueForItem) {
   return items.reduce((total, item) => total + Number(valueForItem(item) || 0), 0);
+}
+
+function setBoundedCache(cache, key, value, maxEntries) {
+  if (cache.has(key)) cache.delete(key);
+  cache.set(key, value);
+  while (cache.size > maxEntries) {
+    const oldestKey = cache.keys().next().value;
+    cache.delete(oldestKey);
+  }
+}
+
+function pruneStoredPullDetails(store) {
+  const keepIds = new Set((store.report?.pulls || []).slice(0, MAX_STORED_PULL_DETAILS).map((pull) => String(pull.id)));
+  for (const id of Object.keys(store.pulls || {})) {
+    if (!keepIds.has(String(id))) delete store.pulls[id];
+  }
+}
+
+function clearResponseCachesForStore(store) {
+  const prefix = `${store.reportCode}-${store.boss?.key || "beloren"}-${store.configHash || store.source?.kickAssignmentsHash || "default"}`;
+  clearCachePrefix(pullResponseCache, `${prefix}:pull:`);
+  nightResponseCache.delete(prefix);
+}
+
+function clearCachePrefix(cache, prefix) {
+  for (const key of [...cache.keys()]) {
+    if (String(key).startsWith(prefix)) cache.delete(key);
+  }
 }
 
 function selectFightFromStore(store, pullId) {

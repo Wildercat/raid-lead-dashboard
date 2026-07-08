@@ -1053,7 +1053,8 @@ function renderKickMarker(event) {
   const left = event.leftPercent;
   const lane = event.lane || 0;
   const expected = event.expectedName ? `${event.assignmentGroup || ""} #${event.order}: expected ${event.expectedName}` : event.status === "extra" ? "No successful interrupt" : "Unassigned";
-  const title = `${event.time} ${event.player?.name || ""} - ${expected}`;
+  const target = event.assignmentGroup && event.assignmentGroup !== "Unassigned" ? ` on ${event.assignmentGroup}` : "";
+  const title = `${event.time} ${event.player?.name || ""}${target} - ${expected}`;
   return `<span class="kick-marker ${escapeHtml(event.status)}" style="left:${left}%; top:${4 + lane * 18}px" title="${escapeHtml(title)}">
     <span class="kick-time">${escapeHtml(event.time)}</span>
     <span class="kick-player">${player(event.player)}</span>
