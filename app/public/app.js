@@ -396,6 +396,7 @@ function renderDashboard(data) {
     metric("Duration", data.fight.duration),
     metric("Boss HP", `${Number(data.fight.bossPercentage).toFixed(1)}%`),
     metric("Deaths", summary.deathCount),
+    metric("Ended", relativeTimeAgo(data.fight.absoluteEndTime)),
   ].join("");
 
   els.wipeCount.textContent = latest.wipeLevelFailures.length;
@@ -871,7 +872,7 @@ function renderTerminateTimeline(timeline) {
   return `<div class="terminate-timeline${selectedSet?.missedTerminate ? " has-failure" : ""}">
     ${spawnSets.length > 1 ? renderTerminateSpawnPicker(spawnSets, selectedSet) : ""}
     ${renderTerminateConfig()}
-    ${renderAssignedGroups(assignedGroups)}
+    ${renderAssignedGroups(timeline?.configuredGroups || assignedGroups)}
     ${renderGroupedKickTimelines(events, assignedGroups, windowStart, durationMs)}
     ${terminateDeaths.length ? renderTerminateDeathRow(terminateDeaths, windowStart, durationMs) : ""}
     ${extraCasts.length ? renderExtraKickRow(extraCasts, windowStart, durationMs) : ""}
@@ -1259,6 +1260,18 @@ function formatDurationCompact(ms) {
   const hours = Math.floor(totalMinutes / 60);
   const minutes = totalMinutes % 60;
   return `${hours}:${String(minutes).padStart(2, "0")}`;
+}
+
+function relativeTimeAgo(timestamp) {
+  const value = Number(timestamp || 0);
+  if (!value) return "Unknown";
+  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - value) / 1000));
+  if (elapsedSeconds < 60) return `${elapsedSeconds}s ago`;
+  const elapsedMinutes = Math.floor(elapsedSeconds / 60);
+  if (elapsedMinutes < 60) return `${elapsedMinutes}m ago`;
+  const elapsedHours = Math.floor(elapsedMinutes / 60);
+  if (elapsedHours < 24) return `${elapsedHours}h ${elapsedMinutes % 60}m ago`;
+  return `${Math.floor(elapsedHours / 24)}d ago`;
 }
 
 function escapeHtml(value) {

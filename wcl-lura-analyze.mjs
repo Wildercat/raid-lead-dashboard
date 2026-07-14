@@ -270,6 +270,10 @@ export function analyzeLuraData(data, options = {}) {
           kill: item.kill,
           bossPercentage: item.bossPercentage,
           duration: formatTime(item.endTime - item.startTime),
+          startTime: item.startTime,
+          endTime: item.endTime,
+          absoluteStartTime: report.startTime + item.startTime,
+          absoluteEndTime: report.startTime + item.endTime,
         })),
       liveLog: liveLogStatus(report, fights),
     },
@@ -283,6 +287,10 @@ export function analyzeLuraData(data, options = {}) {
       kill: fight.kill,
       bossPercentage: fight.bossPercentage,
       duration: formatTime(fight.endTime - fight.startTime),
+      startTime: fight.startTime,
+      endTime: fight.endTime,
+      absoluteStartTime: report.startTime + fight.startTime,
+      absoluteEndTime: report.startTime + fight.endTime,
     },
     fetchedEventCounts: {},
     featherTimeline: null,
@@ -743,6 +751,7 @@ function buildInterruptTimeline({ fight, actorById, casts, interrupts, deaths, k
     selectedSpawnSetId,
     events: spawnSets.find((set) => set.id === selectedSpawnSetId)?.events || spawnSets[0]?.events || [],
     extraCasts,
+    configuredGroups: configuredKickGroups(kickAssignments),
     eventCount: spawnSets.reduce((total, set) => total + set.eventCount, 0),
   };
 }
@@ -851,6 +860,15 @@ function buildMarkerAssignedGroups({ fight, actorById, deaths, events, kickAssig
       }),
     };
   });
+}
+
+function configuredKickGroups(kickAssignments) {
+  return kickAssignments.map((assignedNames, index) => ({
+    id: `configured-${index + 1}`,
+    label: `Group ${index + 1}`,
+    assignedNames,
+    assignedPlayers: assignedNames.map((name) => ({ name, dead: false })),
+  }));
 }
 
 function assumedAssignedNames(actorById, events) {

@@ -1136,6 +1136,10 @@ function bossPullsFromReport(report, encounterID) {
       kill: fight.kill,
       bossPercentage: fight.bossPercentage,
       duration: formatFightDuration(fight.endTime - fight.startTime),
+      startTime: fight.startTime,
+      endTime: fight.endTime,
+      absoluteStartTime: report.startTime + fight.startTime,
+      absoluteEndTime: report.startTime + fight.endTime,
     }));
 }
 
