@@ -396,14 +396,16 @@ async function buildReportDashboardStore(reportUrl, { kickAssignments = "" } = {
 }
 
 async function scanReportForNewPull(reportUrl, { force = false, kickAssignments = "" } = {}) {
-  const store = await getStoredReportDashboard(reportUrl, { kickAssignments });
-  const storeKey = reportStoreKey(store.reportCode, kickAssignments);
+  const context = await getBossContext(reportUrl, { kickAssignments });
+  const storeKey = reportStoreKey(context.reportCode, kickAssignments);
   const scanState = reportScans.get(storeKey) || {};
   const now = Date.now();
 
   if (!force && scanState.lastCheckedAt && now - scanState.lastCheckedAt < SHARED_SCAN_WCL_INTERVAL_MS) {
+    const latestResponse =
+      scanState.latestResponse || (await getPullDashboardResponse(reportUrl, { pullId: "latest", kickAssignments }));
     return {
-      ...(await responseFromReportStore(store, { pullId: "latest", scope: "pull" })),
+      ...latestResponse,
       scan: {
         checkedWcl: false,
         appendedFightIds: [],
@@ -414,32 +416,47 @@ async function scanReportForNewPull(reportUrl, { force = false, kickAssignments 
 
   if (scanState.promise) return scanState.promise;
 
-  const scanPromise = scanAndMaybeAppendBossFights(reportUrl, store, { kickAssignments }).finally(() => {
+  const scanPromise = scanAndMaybeFetchLatestBossFight(reportUrl, context, { kickAssignments }).finally(() => {
     const latest = reportScans.get(storeKey) || {};
     delete latest.promise;
     reportScans.set(storeKey, latest);
   });
 
-  reportScans.set(storeKey, { ...scanState, promise: scanPromise });
+  reportScans.set(storeKey, { ...(reportScans.get(storeKey) || scanState), promise: scanPromise });
   return scanPromise;
 }
 
-async function scanAndMaybeAppendBossFights(reportUrl, store, { kickAssignments = "" } = {}) {
-  const storeKey = reportStoreKey(store.reportCode, kickAssignments);
-  const shell = await fetchBelorenReportShell(reportUrl);
-  const signature = bossFightSignature(shell.report, store.boss?.encounterID);
+async function scanAndMaybeFetchLatestBossFight(reportUrl, context, { kickAssignments = "" } = {}) {
+  const storeKey = reportStoreKey(context.reportCode, kickAssignments);
+  const scanState = reportScans.get(storeKey) || {};
+  const report = context.shell.report;
+  const bossFights = bossPullsFromReport(report, context.adapter.encounterID);
+  const fightIds = bossFights.map((fight) => fight.id);
+  const signature = bossFightSignature(report, context.adapter.encounterID);
+  const previousFightIds = Array.isArray(scanState.fightIds) ? new Set(scanState.fightIds) : null;
   let appendedFightIds = [];
+  let fresh = false;
 
-  if (store.source?.bossFightSignature !== signature) {
-    appendedFightIds = await appendNewBossFightsToStore(store, shell.report, { kickAssignments });
-    if (!appendedFightIds.length) {
-      store = await getStoredReportDashboard(reportUrl, { fresh: true, kickAssignments });
-    }
+  if (previousFightIds) {
+    appendedFightIds = fightIds.filter((fightId) => !previousFightIds.has(fightId));
+    fresh = appendedFightIds.length > 0 || scanState.lastSignature !== signature;
   }
 
-  reportScans.set(storeKey, { lastCheckedAt: Date.now(), lastSignature: signature });
+  reportScans.set(storeKey, {
+    lastCheckedAt: Date.now(),
+    lastSignature: signature,
+    fightIds,
+  });
+
+  const latestResponse = await getPullDashboardResponse(reportUrl, { pullId: "latest", fresh, kickAssignments });
+  const latestState = reportScans.get(storeKey) || {};
+  reportScans.set(storeKey, {
+    ...latestState,
+    latestResponse,
+  });
+
   return {
-    ...(await responseFromReportStore(store, { pullId: "latest", scope: "pull" })),
+    ...latestResponse,
     scan: { checkedWcl: true, appendedFightIds, nextCheckInMs: SHARED_SCAN_WCL_INTERVAL_MS },
   };
 }
