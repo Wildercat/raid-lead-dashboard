@@ -10,6 +10,7 @@ const allProgCache = new Map();
 let currentPullData = null;
 let spellMap = {};
 let livePollTimer = null;
+let pullAgeTimer = null;
 let latestKnownFightId = null;
 let activeTab = "latest";
 let ignoreImmunitySoaks = false;
@@ -396,8 +397,9 @@ function renderDashboard(data) {
     metric("Duration", data.fight.duration),
     metric("Boss HP", `${Number(data.fight.bossPercentage).toFixed(1)}%`),
     metric("Deaths", summary.deathCount),
-    metric("Ended", relativeTimeAgo(data.fight.absoluteEndTime)),
+    liveMetric("Ended", "pull-age", relativeTimeAgo(data.fight.absoluteEndTime)),
   ].join("");
+  startPullAgeTimer(data.fight.absoluteEndTime);
 
   els.wipeCount.textContent = latest.wipeLevelFailures.length;
   els.deathCount.textContent = latest.deaths.length;
@@ -616,6 +618,21 @@ function simpleHash(value) {
 
 function metric(label, value) {
   return `<div class="metric"><span class="metric-label">${escapeHtml(label)}</span><span class="metric-value">${escapeHtml(value)}</span></div>`;
+}
+
+function liveMetric(label, id, value) {
+  return `<div class="metric"><span class="metric-label">${escapeHtml(label)}</span><span id="${escapeHtml(id)}" class="metric-value">${escapeHtml(value)}</span></div>`;
+}
+
+function startPullAgeTimer(absoluteEndTime) {
+  if (pullAgeTimer) clearInterval(pullAgeTimer);
+  updatePullAgeMetric(absoluteEndTime);
+  pullAgeTimer = setInterval(() => updatePullAgeMetric(absoluteEndTime), 1000);
+}
+
+function updatePullAgeMetric(absoluteEndTime) {
+  const node = document.querySelector("#pull-age");
+  if (node) node.textContent = relativeTimeAgo(absoluteEndTime);
 }
 
 function reportCountMetric(allProg) {
