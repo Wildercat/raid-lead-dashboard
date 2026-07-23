@@ -583,13 +583,13 @@ async function buildAllProgDashboard(currentStore, { discoverReports = false, ki
 
   if (discoverReports) await ensureGuildBossNightSummaries({ guildId, difficulty, adapter, kickAssignments });
 
-  const stores = loadNightSummaries()
-    .filter((store) => store.report?.guild?.id === guildId)
-    .filter((store) => store.boss?.key === adapter.key)
-    .filter((store) => (store.configHash || "default") === (currentStore.configHash || "default"))
-    .filter((store) => store.report?.pulls?.some((pull) => pull.difficulty === difficulty));
-
-  if (!stores.some((store) => store.reportCode === currentStore.reportCode)) stores.push(currentStore);
+  const stores = selectAllProgNightSummaries({
+    summaries: [...loadNightSummaries(), currentStore],
+    guildId,
+    difficulty,
+    bossKey: adapter.key,
+    preferredConfigHash: currentStore.configHash || "default",
+  });
 
   return {
     reportCount: stores.length,
@@ -625,6 +625,28 @@ async function buildAllProgDashboard(currentStore, { discoverReports = false, ki
     glaiveHitsByPull: mergeGlaiveHitsByPull(stores),
     glaiveHitsByNight: mergeGlaiveHitsByNight(stores),
   };
+}
+
+function selectAllProgNightSummaries({ summaries, guildId, difficulty, bossKey, preferredConfigHash }) {
+  const byReport = new Map();
+  for (const store of summaries) {
+    if (store.report?.guild?.id !== guildId) continue;
+    if (store.boss?.key !== bossKey) continue;
+    if (!store.report?.pulls?.some((pull) => pull.difficulty === difficulty)) continue;
+
+    const current = byReport.get(store.reportCode);
+    if (!current || preferredAllProgSummary(store, current, preferredConfigHash)) {
+      byReport.set(store.reportCode, store);
+    }
+  }
+  return [...byReport.values()];
+}
+
+function preferredAllProgSummary(candidate, current, preferredConfigHash) {
+  const candidateMatches = (candidate.configHash || "default") === preferredConfigHash;
+  const currentMatches = (current.configHash || "default") === preferredConfigHash;
+  if (candidateMatches !== currentMatches) return candidateMatches;
+  return new Date(candidate.fetchedAt || 0).getTime() > new Date(current.fetchedAt || 0).getTime();
 }
 
 async function ensureGuildBossNightSummaries({ guildId, difficulty, adapter, kickAssignments = "" }) {
