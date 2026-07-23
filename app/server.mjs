@@ -16,7 +16,7 @@ const ROOT = fileURLToPath(new URL(".", import.meta.url));
 const PUBLIC_ROOT = join(ROOT, "public");
 const DATA_CACHE_ROOT = process.env.DATA_CACHE_DIR || join(ROOT, "..", ".data-cache");
 const CHAT_LOG_PATH = process.env.CHAT_LOG_PATH || "C:\\Users\\Abram Gornik\\Documents\\WowChatLog.txt";
-const STORE_VERSION = 15;
+const STORE_VERSION = 19;
 const ENCOUNTER_ID_BELOREN = 3182;
 const ALLOWED_ALL_PROG_GUILD_IDS = new Set([811453, 713862]);
 const SHARED_SCAN_WCL_INTERVAL_MS = 5000;
@@ -621,6 +621,9 @@ async function buildAllProgDashboard(currentStore, { discoverReports = false, ki
       fields: ["totalUses", "healthstoneUses", "healthPotionUses", "healing", "overheal"],
     }),
     mistakeLeaderboard: mergeMistakeLeaderboards(stores),
+    glaiveMistakeLeaderboard: mergeMistakeLeaderboards(stores, "glaiveMistakeLeaderboard"),
+    glaiveHitsByPull: mergeGlaiveHitsByPull(stores),
+    glaiveHitsByNight: mergeGlaiveHitsByNight(stores),
   };
 }
 
@@ -1036,10 +1039,10 @@ function mergeLeaderboardRows(stores, key, { primary, fields, withSurvivalRate =
     .sort((a, b) => Number(b[primary] || 0) - Number(a[primary] || 0) || a.player.name.localeCompare(b.player.name));
 }
 
-function mergeMistakeLeaderboards(stores) {
+function mergeMistakeLeaderboards(stores, key = "mistakeLeaderboard") {
   const rows = new Map();
   for (const store of stores) {
-    for (const item of store.wholeNight?.mistakeLeaderboard || []) {
+    for (const item of store.wholeNight?.[key] || []) {
       const playerKey = playerMergeKey(item.player);
       if (!playerKey) continue;
       const row = rows.get(playerKey) || {
@@ -1069,9 +1072,82 @@ function mergeMistakeLeaderboards(stores) {
       player: row.player,
       totalMistakes: row.totalMistakes,
       pullCount: row.pullCount,
+      mistakesPerAttempt: row.pullCount ? row.totalMistakes / row.pullCount : 0,
       mistakes: [...row.mistakeCounts.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label)),
     }))
     .sort((a, b) => b.totalMistakes - a.totalMistakes || a.player.name.localeCompare(b.player.name));
+}
+
+function mergeGlaiveHitsByPull(stores) {
+  return stores
+    .flatMap((store) =>
+      (store.wholeNight?.glaiveHitsByPull || []).map((point) => ({
+        ...point,
+        reportCode: point.reportCode || store.reportCode,
+        reportTitle: store.report?.title || point.reportTitle || "",
+      })),
+    )
+    .sort(
+      (a, b) =>
+        Number(a.absoluteStartTime || 0) - Number(b.absoluteStartTime || 0) ||
+        String(a.reportCode || "").localeCompare(String(b.reportCode || "")) ||
+        Number(a.fightId || 0) - Number(b.fightId || 0),
+    )
+    .map((point, index) => ({
+      ...point,
+      globalPullNumber: index + 1,
+      globalLabel: `Pull ${index + 1}`,
+    }));
+}
+
+function mergeGlaiveHitsByNight(stores) {
+  return stores
+    .map((store) => {
+      const existing = store.wholeNight?.glaiveHitsByNight?.[0];
+      if (existing) {
+        const combatDurationMs = Number(existing.combatDurationMs || store.wholeNight?.combatDurationMs || 0);
+        const combatMinutes = combatDurationMs / 60000;
+        const totalHits = Number(existing.totalHits || 0);
+        return {
+          ...existing,
+          reportCode: existing.reportCode || store.reportCode,
+          reportTitle: existing.reportTitle || store.report?.title || "",
+          combatDurationMs,
+          glaiveHitsPerMinute:
+            existing.glaiveHitsPerMinute !== undefined
+              ? Number(existing.glaiveHitsPerMinute || 0)
+              : combatMinutes > 0
+                ? totalHits / combatMinutes
+                : 0,
+        };
+      }
+
+      const pulls = store.wholeNight?.glaiveHitsByPull || [];
+      const totalHits = pulls.reduce((total, point) => total + Number(point.count || 0), 0);
+      const combatDurationMs = Number(store.wholeNight?.combatDurationMs || 0);
+      const combatMinutes = combatDurationMs / 60000;
+      return {
+        reportCode: store.reportCode,
+        reportTitle: store.report?.title || "",
+        label: store.report?.title || store.reportCode,
+        pullCount: pulls.length,
+        totalHits,
+        combatDurationMs,
+        glaiveHitsPerMinute: combatMinutes > 0 ? totalHits / combatMinutes : 0,
+        absoluteStartTime: Number(store.report?.pulls?.slice(-1)[0]?.absoluteStartTime || pulls[0]?.absoluteStartTime || 0),
+      };
+    })
+    .filter((point) => point.pullCount > 0)
+    .sort(
+      (a, b) =>
+        Number(a.absoluteStartTime || 0) - Number(b.absoluteStartTime || 0) ||
+        String(a.reportCode || "").localeCompare(String(b.reportCode || "")),
+    )
+    .map((point, index) => ({
+      ...point,
+      globalNightNumber: index + 1,
+      globalLabel: `Night ${index + 1}`,
+    }));
 }
 
 function playerMergeKey(player) {

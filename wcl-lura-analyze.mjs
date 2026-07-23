@@ -328,6 +328,9 @@ export function analyzeLuraData(data, options = {}) {
       consumableLeaderboard: mergeRows(analyses.map((item) => item.lightsEndCausedLeaderboard), "totalWipesCaused", ["totalWipesCaused"]),
       eggDamageLeaderboard: [],
       mistakeLeaderboard: buildMistakeLeaderboard(analyses),
+      glaiveMistakeLeaderboard: buildMistakeLeaderboard(analyses, isGlaiveMistake),
+      glaiveHitsByPull: buildGlaiveHitsByPull(analyses, report, fightNumberById),
+      glaiveHitsByNight: buildGlaiveHitsByNight(analyses, report, fightNumberById),
     };
     return output;
   }
@@ -1174,14 +1177,17 @@ function mergeRows(leaderboards, primary, fields) {
   return [...rows.values()].sort((a, b) => Number(b[primary] || 0) - Number(a[primary] || 0) || a.player.name.localeCompare(b.player.name));
 }
 
-function buildMistakeLeaderboard(analyses) {
+function buildMistakeLeaderboard(analyses, includeMistake = () => true) {
   const rows = new Map();
   for (const analysis of analyses) {
     for (const player of analysis.presentPlayers) {
       const key = playerMergeKey(player);
-      if (!rows.has(key)) rows.set(key, { player, totalMistakes: 0, pullCount: 0, pulls: new Set(), mistakeCounts: new Map() });
+      const row = rows.get(key) || { player, totalMistakes: 0, presentPulls: new Set(), mistakeCounts: new Map() };
+      row.presentPulls.add(analysis.fight.id);
+      rows.set(key, row);
     }
     for (const mistake of analysis.mistakes) {
+      if (!includeMistake(mistake)) continue;
       const key = playerMergeKey(mistake.player);
       const row = rows.get(key);
       if (!row) continue;
@@ -1189,15 +1195,53 @@ function buildMistakeLeaderboard(analyses) {
       current.count += 1;
       row.mistakeCounts.set(mistake.label, current);
       row.totalMistakes += 1;
-      row.pulls.add(analysis.fight.id);
     }
   }
   return [...rows.values()].map((row) => ({
     player: row.player,
     totalMistakes: row.totalMistakes,
-    pullCount: row.pulls.size,
+    pullCount: row.presentPulls.size,
+    mistakesPerAttempt: row.presentPulls.size ? row.totalMistakes / row.presentPulls.size : 0,
     mistakes: [...row.mistakeCounts.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label)),
   })).sort((a, b) => b.totalMistakes - a.totalMistakes || a.player.name.localeCompare(b.player.name));
+}
+
+function isGlaiveMistake(mistake) {
+  return mistake?.label === "Hit by glaive" || mistake?.mechanic === "Heaven's Glaives";
+}
+
+function buildGlaiveHitsByPull(analyses, report, fightNumberById) {
+  return analyses.map((analysis) => {
+    const count = analysis.mistakes.filter(isGlaiveMistake).length;
+    const wipeNumber = fightNumberById.get(analysis.fight.id) || analysis.fight.id;
+    return {
+      reportCode: report.code,
+      fightId: analysis.fight.id,
+      wipeNumber,
+      label: `Wipe ${wipeNumber}`,
+      count,
+      absoluteStartTime: report.startTime + analysis.fight.startTime,
+    };
+  });
+}
+
+function buildGlaiveHitsByNight(analyses, report, fightNumberById) {
+  const pulls = buildGlaiveHitsByPull(analyses, report, fightNumberById);
+  const totalHits = pulls.reduce((total, point) => total + Number(point.count || 0), 0);
+  const combatDurationMs = analyses.reduce((total, analysis) => total + (analysis.fight.endTime - analysis.fight.startTime), 0);
+  const combatMinutes = combatDurationMs / 60000;
+  return [
+    {
+      reportCode: report.code,
+      reportTitle: report.title,
+      label: report.title || report.code,
+      pullCount: pulls.length,
+      totalHits,
+      combatDurationMs,
+      glaiveHitsPerMinute: combatMinutes > 0 ? totalHits / combatMinutes : 0,
+      absoluteStartTime: report.startTime + (analyses[0]?.fight?.startTime || 0),
+    },
+  ];
 }
 
 function buildDeaths({ fight, actorById, deaths, damageEvents, mistakes }) {

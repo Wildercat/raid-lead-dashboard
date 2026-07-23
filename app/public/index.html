@@ -151,10 +151,50 @@
           <div class="module-grid">
             <section class="panel">
               <header class="panel-header">
-                <h2>Mistakes By Player</h2>
+                <div>
+                  <h2>Mistakes By Player</h2>
+                  <div class="mode-toggle mistake-rate-toggle" role="group" aria-label="Whole night mistake metric">
+                    <label>
+                      <input type="radio" name="night-mistake-mode" value="total" checked />
+                      <span>Total</span>
+                    </label>
+                    <label>
+                      <input type="radio" name="night-mistake-mode" value="per-attempt" />
+                      <span>Per attempt</span>
+                    </label>
+                  </div>
+                </div>
                 <span id="night-mistake-count" class="count">0</span>
               </header>
               <div id="night-mistakes"></div>
+            </section>
+
+            <section class="panel glaive-panel">
+              <header class="panel-header">
+                <div>
+                  <h2>Hit By Glaive</h2>
+                  <div class="mode-toggle mistake-rate-toggle" role="group" aria-label="Whole night glaive metric">
+                    <label>
+                      <input type="radio" name="night-glaive-mistake-mode" value="total" checked />
+                      <span>Total</span>
+                    </label>
+                    <label>
+                      <input type="radio" name="night-glaive-mistake-mode" value="per-attempt" />
+                      <span>Per attempt</span>
+                    </label>
+                  </div>
+                </div>
+                <span id="night-glaive-count" class="count">0</span>
+              </header>
+              <div id="night-glaives"></div>
+            </section>
+
+            <section class="panel glaive-panel">
+              <header class="panel-header">
+                <h2>Glaive Hits / Minute</h2>
+                <span id="night-glaive-trend-count" class="count">0</span>
+              </header>
+              <div id="night-glaive-trend"></div>
             </section>
 
             <section class="panel">
@@ -211,10 +251,50 @@
           <div class="module-grid">
             <section class="panel">
               <header class="panel-header">
-                <h2>Mistakes By Player</h2>
+                <div>
+                  <h2>Mistakes By Player</h2>
+                  <div class="mode-toggle mistake-rate-toggle" role="group" aria-label="All progression mistake metric">
+                    <label>
+                      <input type="radio" name="all-prog-mistake-mode" value="total" checked />
+                      <span>Total</span>
+                    </label>
+                    <label>
+                      <input type="radio" name="all-prog-mistake-mode" value="per-attempt" />
+                      <span>Per attempt</span>
+                    </label>
+                  </div>
+                </div>
                 <span id="all-prog-mistake-count" class="count">0</span>
               </header>
               <div id="all-prog-mistakes"></div>
+            </section>
+
+            <section class="panel glaive-panel">
+              <header class="panel-header">
+                <div>
+                  <h2>Hit By Glaive</h2>
+                  <div class="mode-toggle mistake-rate-toggle" role="group" aria-label="All progression glaive metric">
+                    <label>
+                      <input type="radio" name="all-prog-glaive-mistake-mode" value="total" checked />
+                      <span>Total</span>
+                    </label>
+                    <label>
+                      <input type="radio" name="all-prog-glaive-mistake-mode" value="per-attempt" />
+                      <span>Per attempt</span>
+                    </label>
+                  </div>
+                </div>
+                <span id="all-prog-glaive-count" class="count">0</span>
+              </header>
+              <div id="all-prog-glaives"></div>
+            </section>
+
+            <section class="panel glaive-panel">
+              <header class="panel-header">
+                <h2>Glaive Hits / Minute</h2>
+                <span id="all-prog-glaive-trend-count" class="count">0</span>
+              </header>
+              <div id="all-prog-glaive-trend"></div>
             </section>
 
             <section class="panel">

@@ -600,14 +600,6 @@ function presentPlayersFromCombatantInfo(actorById, specByActor, combatantInfoEv
   return [...rows.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
-function uniquePlayers(players) {
-  const rows = new Map();
-  for (const player of players) {
-    if (player?.id) rows.set(player.id, player);
-  }
-  return [...rows.values()].sort((a, b) => a.name.localeCompare(b.name));
-}
-
 function evidenceForDamageEvent({ event, fight, actorById, feather }) {
   const abilityId = abilityIdOf(event);
   return {
@@ -1503,20 +1495,22 @@ function mergeEggDamageLeaderboards(actorById, leaderboards) {
   );
 }
 
-function buildMistakeLeaderboard(actorById, presentPlayers, mistakesByFight) {
+function buildMistakeLeaderboard(actorById, analyses) {
   const rows = new Map();
 
-  for (const player of presentPlayers) {
-    rows.set(player.id, {
-      player: actorMeta(actorById, player.id),
-      totalMistakes: 0,
-      mistakeCounts: new Map(),
-      pulls: new Set(),
-    });
-  }
+  for (const analysis of analyses) {
+    for (const player of analysis.presentPlayers) {
+      const row = rows.get(player.id) || {
+        player: actorMeta(actorById, player.id),
+        totalMistakes: 0,
+        mistakeCounts: new Map(),
+        presentPulls: new Set(),
+      };
+      row.presentPulls.add(analysis.fight.id);
+      rows.set(player.id, row);
+    }
 
-  for (const { fight, mistakes } of mistakesByFight) {
-    for (const mistake of mistakes.filter((item) => item.category === "likely_mistake")) {
+    for (const mistake of analysis.mistakes.filter((item) => item.category === "likely_mistake")) {
       const id = mistake.player?.id;
       if (!id) continue;
       const row =
@@ -1525,7 +1519,7 @@ function buildMistakeLeaderboard(actorById, presentPlayers, mistakesByFight) {
           player: actorMeta(actorById, id),
           totalMistakes: 0,
           mistakeCounts: new Map(),
-          pulls: new Set(),
+          presentPulls: new Set(),
         };
       const key = mistake.label;
       const current = row.mistakeCounts.get(key) || {
@@ -1536,7 +1530,6 @@ function buildMistakeLeaderboard(actorById, presentPlayers, mistakesByFight) {
       current.count += 1;
       row.mistakeCounts.set(key, current);
       row.totalMistakes += 1;
-      row.pulls.add(fight.id);
       rows.set(id, row);
     }
   }
@@ -1545,7 +1538,8 @@ function buildMistakeLeaderboard(actorById, presentPlayers, mistakesByFight) {
     .map((row) => ({
       player: row.player,
       totalMistakes: row.totalMistakes,
-      pullCount: row.pulls.size,
+      pullCount: row.presentPulls.size,
+      mistakesPerAttempt: row.presentPulls.size ? row.totalMistakes / row.presentPulls.size : 0,
       mistakes: [...row.mistakeCounts.values()].sort(
         (a, b) => b.count - a.count || a.label.localeCompare(b.label),
       ),
@@ -1923,11 +1917,10 @@ export function analyzeBelorenData(data, options = {}) {
         actorById,
         analyses.map((item) => item.consumableLeaderboard),
       ),
-      mistakeLeaderboard: buildMistakeLeaderboard(
-        actorById,
-        uniquePlayers(analyses.flatMap((item) => item.presentPlayers)),
-        analyses.map((item) => ({ fight: item.fight, mistakes: item.mistakes })),
-      ),
+      mistakeLeaderboard: buildMistakeLeaderboard(actorById, analyses),
+      glaiveMistakeLeaderboard: [],
+      glaiveHitsByPull: [],
+      glaiveHitsByNight: [],
     };
   }
 

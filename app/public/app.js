@@ -50,12 +50,16 @@ const els = {
   eggDamage: document.querySelector("#egg-damage"),
   consumables: document.querySelector("#consumables"),
   nightMistakes: document.querySelector("#night-mistakes"),
+  nightGlaives: document.querySelector("#night-glaives"),
+  nightGlaiveTrend: document.querySelector("#night-glaive-trend"),
   nightEchoSoaks: document.querySelector("#night-echo-soaks"),
   nightQuillSoaks: document.querySelector("#night-quill-soaks"),
   nightEruptionInterrupts: document.querySelector("#night-eruption-interrupts"),
   nightEggDamage: document.querySelector("#night-egg-damage"),
   nightConsumables: document.querySelector("#night-consumables"),
   allProgMistakes: document.querySelector("#all-prog-mistakes"),
+  allProgGlaives: document.querySelector("#all-prog-glaives"),
+  allProgGlaiveTrend: document.querySelector("#all-prog-glaive-trend"),
   allProgEchoSoaks: document.querySelector("#all-prog-echo-soaks"),
   allProgQuillSoaks: document.querySelector("#all-prog-quill-soaks"),
   allProgEruptionInterrupts: document.querySelector("#all-prog-eruption-interrupts"),
@@ -79,12 +83,16 @@ const els = {
   eggDamageCount: document.querySelector("#egg-damage-count"),
   consumableCount: document.querySelector("#consumable-count"),
   nightMistakeCount: document.querySelector("#night-mistake-count"),
+  nightGlaiveCount: document.querySelector("#night-glaive-count"),
+  nightGlaiveTrendCount: document.querySelector("#night-glaive-trend-count"),
   nightSoakCount: document.querySelector("#night-soak-count"),
   nightQuillCount: document.querySelector("#night-quill-count"),
   nightInterruptCount: document.querySelector("#night-interrupt-count"),
   nightEggDamageCount: document.querySelector("#night-egg-damage-count"),
   nightConsumableCount: document.querySelector("#night-consumable-count"),
   allProgMistakeCount: document.querySelector("#all-prog-mistake-count"),
+  allProgGlaiveCount: document.querySelector("#all-prog-glaive-count"),
+  allProgGlaiveTrendCount: document.querySelector("#all-prog-glaive-trend-count"),
   allProgSoakCount: document.querySelector("#all-prog-soak-count"),
   allProgQuillCount: document.querySelector("#all-prog-quill-count"),
   allProgInterruptCount: document.querySelector("#all-prog-interrupt-count"),
@@ -103,6 +111,7 @@ const bossLabels = {
     symbolCalls: "",
     consumables: "Healthstone / Potions",
     eggDamage: "Egg Damage",
+    glaiveMistakes: "",
   },
   lura: {
     title: "Midnight Falls Review",
@@ -115,6 +124,7 @@ const bossLabels = {
     symbolCalls: "Memory Game",
     consumables: "Light's End Wipes Caused",
     eggDamage: "",
+    glaiveMistakes: "Hit By Glaive",
   },
 };
 
@@ -195,6 +205,12 @@ document.querySelectorAll(".ignore-immunity-toggle").forEach((toggle) => {
     ignoreImmunitySoaks = toggle.checked;
     syncImmunityToggles();
     renderEchoLeaderboardSections();
+  });
+});
+
+document.querySelectorAll(".mistake-rate-toggle input").forEach((toggle) => {
+  toggle.addEventListener("change", () => {
+    renderAggregateMistakeSections();
   });
 });
 
@@ -463,6 +479,9 @@ function applyBossLabels(bossKey) {
   els.symbolCalls.closest(".panel").classList.toggle("is-hidden", !labels.symbolCalls);
   els.nightEggDamage.closest(".panel").classList.toggle("is-hidden", !labels.eggDamage);
   els.allProgEggDamage.closest(".panel").classList.toggle("is-hidden", !labels.eggDamage);
+  document.querySelectorAll(".glaive-panel").forEach((panel) => {
+    panel.classList.toggle("is-hidden", !labels.glaiveMistakes);
+  });
   els.consumables.closest(".panel").classList.toggle("is-hidden", bossKey === "lura");
   document.querySelectorAll(".mini-toggle").forEach((toggle) => {
     toggle.classList.toggle("is-hidden", bossKey === "lura");
@@ -487,13 +506,22 @@ function renderNightDashboard(night) {
   ].join("");
 
   els.nightMistakeCount.textContent = night.mistakeLeaderboard.length;
+  els.nightGlaiveCount.textContent = (night.glaiveMistakeLeaderboard || []).length;
+  els.nightGlaiveTrendCount.textContent = (night.glaiveHitsByNight || night.glaiveHitsByPull || []).length;
   els.nightSoakCount.textContent = night.correctEchoSoakLeaderboard.length;
   els.nightQuillCount.textContent = night.correctQuillSoakLeaderboard.length;
   els.nightInterruptCount.textContent = night.eruptionInterruptLeaderboard.length;
   els.nightEggDamageCount.textContent = night.eggDamageLeaderboard.length;
   els.nightConsumableCount.textContent = night.consumableLeaderboard.length;
 
-  els.nightMistakes.innerHTML = renderNightMistakes(night.mistakeLeaderboard);
+  els.nightMistakes.innerHTML = renderNightMistakes(night.mistakeLeaderboard, {
+    mode: currentMistakeMode("night"),
+  });
+  els.nightGlaives.innerHTML = renderNightMistakes(night.glaiveMistakeLeaderboard || [], {
+    mode: currentMistakeMode("night-glaive"),
+    emptyMessage: "No glaive hits detected.",
+  });
+  els.nightGlaiveTrend.innerHTML = renderGlaiveTrend(night.glaiveHitsByNight || night.glaiveHitsByPull || []);
   els.nightEchoSoaks.innerHTML = renderEchoSoaks(night.correctEchoSoakLeaderboard);
   els.nightQuillSoaks.innerHTML = renderQuillSoaks(night.correctQuillSoakLeaderboard);
   els.nightEruptionInterrupts.innerHTML = renderEruptionInterrupts(night.eruptionInterruptLeaderboard);
@@ -504,12 +532,16 @@ function renderNightDashboard(night) {
 function renderNightPlaceholder() {
   els.nightSummaryGrid.innerHTML = "";
   els.nightMistakeCount.textContent = 0;
+  els.nightGlaiveCount.textContent = 0;
+  els.nightGlaiveTrendCount.textContent = 0;
   els.nightSoakCount.textContent = 0;
   els.nightQuillCount.textContent = 0;
   els.nightInterruptCount.textContent = 0;
   els.nightEggDamageCount.textContent = 0;
   els.nightConsumableCount.textContent = 0;
   els.nightMistakes.innerHTML = empty("Loading night-wide mistakes.");
+  els.nightGlaives.innerHTML = empty("Loading night-wide glaive hits.");
+  els.nightGlaiveTrend.innerHTML = empty("Loading night-wide glaive trend.");
   els.nightEchoSoaks.innerHTML = empty("Loading night-wide soaks.");
   els.nightQuillSoaks.innerHTML = empty("Loading night-wide quill soaks.");
   els.nightEruptionInterrupts.innerHTML = empty("Loading night-wide interrupts.");
@@ -531,13 +563,22 @@ function renderAllProgDashboard(allProg) {
   ].join("");
 
   els.allProgMistakeCount.textContent = allProg.mistakeLeaderboard.length;
+  els.allProgGlaiveCount.textContent = (allProg.glaiveMistakeLeaderboard || []).length;
+  els.allProgGlaiveTrendCount.textContent = (allProg.glaiveHitsByNight || allProg.glaiveHitsByPull || []).length;
   els.allProgSoakCount.textContent = allProg.correctEchoSoakLeaderboard.length;
   els.allProgQuillCount.textContent = allProg.correctQuillSoakLeaderboard.length;
   els.allProgInterruptCount.textContent = allProg.eruptionInterruptLeaderboard.length;
   els.allProgEggDamageCount.textContent = allProg.eggDamageLeaderboard.length;
   els.allProgConsumableCount.textContent = allProg.consumableLeaderboard.length;
 
-  els.allProgMistakes.innerHTML = renderNightMistakes(allProg.mistakeLeaderboard);
+  els.allProgMistakes.innerHTML = renderNightMistakes(allProg.mistakeLeaderboard, {
+    mode: currentMistakeMode("all-prog"),
+  });
+  els.allProgGlaives.innerHTML = renderNightMistakes(allProg.glaiveMistakeLeaderboard || [], {
+    mode: currentMistakeMode("all-prog-glaive"),
+    emptyMessage: "No glaive hits detected.",
+  });
+  els.allProgGlaiveTrend.innerHTML = renderGlaiveTrend(allProg.glaiveHitsByNight || allProg.glaiveHitsByPull || []);
   els.allProgEchoSoaks.innerHTML = renderEchoSoaks(allProg.correctEchoSoakLeaderboard);
   els.allProgQuillSoaks.innerHTML = renderQuillSoaks(allProg.correctQuillSoakLeaderboard);
   els.allProgEruptionInterrupts.innerHTML = renderEruptionInterrupts(allProg.eruptionInterruptLeaderboard);
@@ -548,12 +589,16 @@ function renderAllProgDashboard(allProg) {
 function renderAllProgPlaceholder() {
   els.allProgSummaryGrid.innerHTML = "";
   els.allProgMistakeCount.textContent = 0;
+  els.allProgGlaiveCount.textContent = 0;
+  els.allProgGlaiveTrendCount.textContent = 0;
   els.allProgSoakCount.textContent = 0;
   els.allProgQuillCount.textContent = 0;
   els.allProgInterruptCount.textContent = 0;
   els.allProgEggDamageCount.textContent = 0;
   els.allProgConsumableCount.textContent = 0;
   els.allProgMistakes.innerHTML = empty("Loading all-prog mistakes.");
+  els.allProgGlaives.innerHTML = empty("Loading all-prog glaive hits.");
+  els.allProgGlaiveTrend.innerHTML = empty("Loading all-prog glaive trend.");
   els.allProgEchoSoaks.innerHTML = empty("Loading all-prog soaks.");
   els.allProgQuillSoaks.innerHTML = empty("Loading all-prog quill soaks.");
   els.allProgEruptionInterrupts.innerHTML = empty("Loading all-prog interrupts.");
@@ -769,6 +814,103 @@ function renderEchoLeaderboardSections() {
   if (allProgPayload?.allProg) {
     els.allProgEchoSoaks.innerHTML = renderEchoSoaks(allProgPayload.allProg.correctEchoSoakLeaderboard);
   }
+}
+
+function renderAggregateMistakeSections() {
+  const nightPayload = nightCache.get(nightCacheKey(reportUrlInput.value.trim()));
+  if (nightPayload?.wholeNight) {
+    els.nightMistakes.innerHTML = renderNightMistakes(nightPayload.wholeNight.mistakeLeaderboard, {
+      mode: currentMistakeMode("night"),
+    });
+    els.nightGlaives.innerHTML = renderNightMistakes(nightPayload.wholeNight.glaiveMistakeLeaderboard || [], {
+      mode: currentMistakeMode("night-glaive"),
+      emptyMessage: "No glaive hits detected.",
+    });
+  }
+
+  const allProgPayload = allProgCache.get(allProgCacheKey(reportUrlInput.value.trim()));
+  if (allProgPayload?.allProg) {
+    els.allProgMistakes.innerHTML = renderNightMistakes(allProgPayload.allProg.mistakeLeaderboard, {
+      mode: currentMistakeMode("all-prog"),
+    });
+    els.allProgGlaives.innerHTML = renderNightMistakes(allProgPayload.allProg.glaiveMistakeLeaderboard || [], {
+      mode: currentMistakeMode("all-prog-glaive"),
+      emptyMessage: "No glaive hits detected.",
+    });
+  }
+}
+
+function currentMistakeMode(scope) {
+  return document.querySelector(`input[name="${scope}-mistake-mode"]:checked`)?.value || "total";
+}
+
+function renderGlaiveTrend(points) {
+  if (!points.length) return empty("No glaive hit trend data.");
+  const plotsNightRates = points.some((point) => point.glaiveHitsPerMinute !== undefined);
+  const valueForPoint = (point) =>
+    plotsNightRates ? Number(point.glaiveHitsPerMinute || 0) : Number(point.count || 0);
+  const formatTrendValue = (value) => (plotsNightRates ? Number(value || 0).toFixed(2) : formatNumber(value));
+  const width = Math.max(680, points.length * (plotsNightRates ? 90 : 26) + 42);
+  const height = 190;
+  const pad = { top: 18, right: 14, bottom: 34, left: 28 };
+  const innerWidth = width - pad.left - pad.right;
+  const innerHeight = height - pad.top - pad.bottom;
+  const maxCount = Math.max(...points.map(valueForPoint), 1);
+  const xFor = (index) => pad.left + (points.length === 1 ? innerWidth / 2 : (index / (points.length - 1)) * innerWidth);
+  const yFor = (value) => pad.top + innerHeight - (Number(value || 0) / maxCount) * innerHeight;
+  const values = points.map(valueForPoint);
+  const normalized = movingAverage(values, Math.min(5, Math.max(1, points.length)));
+  const actualPath = points.map((point, index) => `${index === 0 ? "M" : "L"} ${xFor(index).toFixed(1)} ${yFor(valueForPoint(point)).toFixed(1)}`).join(" ");
+  const normalizedPath = normalized.map((value, index) => `${index === 0 ? "M" : "L"} ${xFor(index).toFixed(1)} ${yFor(value).toFixed(1)}`).join(" ");
+  const xLabels = points
+    .map((point, index) => {
+      if (points.length > 18 && index % Math.ceil(points.length / 12) !== 0 && index !== points.length - 1) return "";
+      return `<text class="trend-axis-label" x="${xFor(index).toFixed(1)}" y="${height - 12}" text-anchor="middle">${escapeHtml(point.globalNightNumber || point.globalPullNumber || point.wipeNumber || index + 1)}</text>`;
+    })
+    .join("");
+  const dots = points
+    .map((point, index) => {
+      const x = xFor(index);
+      const value = valueForPoint(point);
+      const y = yFor(value);
+      const labelY = Math.max(10, y - 7);
+      const tooltipLabel = point.globalNightNumber
+        ? `${point.globalLabel || `Night ${point.globalNightNumber}`} (${point.reportTitle || point.reportCode || "Report"}, ${formatDurationCompact(point.combatDurationMs)} combat, ${formatNumber(point.totalHits)} total hits)`
+        : point.globalPullNumber
+        ? `${point.globalLabel || `Pull ${point.globalPullNumber}`} (${point.reportTitle || point.reportCode || "Report"} / ${point.label || `Wipe ${point.wipeNumber || index + 1}`})`
+        : point.label || `Pull ${index + 1}`;
+      return `<g>
+        <circle class="trend-dot" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3.5"><title>${escapeHtml(tooltipLabel)}: ${formatTrendValue(value)} ${plotsNightRates ? "glaive hits / minute" : "glaive hits"}</title></circle>
+        <text class="trend-point-label" x="${x.toFixed(1)}" y="${labelY.toFixed(1)}" text-anchor="middle">${formatTrendValue(value)}</text>
+      </g>`;
+    })
+    .join("");
+
+  return `<div class="trend-chart">
+    <svg viewBox="0 0 ${width} ${height}" style="min-width:${width}px" role="img" aria-label="Glaive hits by pull">
+      <line class="trend-axis" x1="${pad.left}" y1="${pad.top + innerHeight}" x2="${width - pad.right}" y2="${pad.top + innerHeight}"></line>
+      <line class="trend-axis" x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + innerHeight}"></line>
+      <text class="trend-axis-label" x="2" y="${pad.top + 4}">${formatTrendValue(maxCount)}</text>
+      <text class="trend-axis-label" x="8" y="${pad.top + innerHeight + 4}">0</text>
+      <path class="trend-actual-line" d="${actualPath}"></path>
+      <path class="trend-normalized-line" d="${normalizedPath}"></path>
+      ${dots}
+      ${xLabels}
+    </svg>
+    <div class="trend-legend">
+      <span><i class="legend-dot"></i>${plotsNightRates ? "Hits / min" : "Hits"}</span>
+      <span><i class="legend-line"></i>Normalized curve</span>
+    </div>
+  </div>`;
+}
+
+function movingAverage(values, windowSize) {
+  return values.map((_, index) => {
+    const start = Math.max(0, index - Math.floor(windowSize / 2));
+    const end = Math.min(values.length, index + Math.ceil(windowSize / 2));
+    const slice = values.slice(start, end);
+    return slice.reduce((total, value) => total + value, 0) / Math.max(slice.length, 1);
+  });
 }
 
 function renderEchoSoaks(rows, { expandable = false } = {}) {
@@ -1121,26 +1263,52 @@ function renderConsumables(rows) {
   );
 }
 
-function renderNightMistakes(rows) {
-  if (!rows.length) return empty((bossLabels[currentBossKey] || bossLabels.beloren).mistakesEmpty);
-  const max = Math.max(...rows.map((row) => row.totalMistakes), 1);
+function renderNightMistakes(rows, { mode = "total", emptyMessage = null } = {}) {
+  if (!rows.length) return empty(emptyMessage || (bossLabels[currentBossKey] || bossLabels.beloren).mistakesEmpty);
+  const sortedRows = sortedMistakeRows(rows, mode);
+  const max = Math.max(...sortedRows.map((row) => mistakeMetricValue(row, mode)), 1);
+  const metricLabel = mode === "per-attempt" ? "Per att" : "Total";
   return `<div class="night-mistake-list">
     <div class="night-mistake-header">
       <span>Player</span>
-      <span>Total</span>
-      <span>Wipes</span>
+      <span>${metricLabel}</span>
+      <span>Attempts</span>
     </div>
-    ${rows.map((row) => renderNightMistakeRow(row, max)).join("")}
+    ${sortedRows.map((row) => renderNightMistakeRow(row, max, mode)).join("")}
   </div>`;
 }
 
-function renderNightMistakeRow(row, max) {
-  const width = Math.max(4, Math.round((row.totalMistakes / max) * 100));
+function sortedMistakeRows(rows, mode) {
+  return rows
+    .slice()
+    .sort(
+      (a, b) =>
+        mistakeMetricValue(b, mode) - mistakeMetricValue(a, mode) ||
+        Number(b.totalMistakes || 0) - Number(a.totalMistakes || 0) ||
+        a.player.name.localeCompare(b.player.name),
+    );
+}
+
+function mistakeMetricValue(row, mode) {
+  if (mode === "per-attempt") {
+    return Number(row.mistakesPerAttempt ?? (Number(row.totalMistakes || 0) / Math.max(Number(row.pullCount || 0), 1)));
+  }
+  return Number(row.totalMistakes || 0);
+}
+
+function formatMistakeMetric(row, mode) {
+  if (mode === "per-attempt") return mistakeMetricValue(row, mode).toFixed(2);
+  return formatNumber(row.totalMistakes);
+}
+
+function renderNightMistakeRow(row, max, mode) {
+  const value = mistakeMetricValue(row, mode);
+  const width = value > 0 ? Math.max(4, Math.round((value / max) * 100)) : 0;
   return `<article class="night-mistake-row">
     <details>
       <summary class="night-mistake-main">
         <span>${player(row.player)}</span>
-        <span class="bar-cell"><span class="bar-track"><span class="bar-fill ${classColorClass(row.player.class)}" style="width:${width}%"></span></span><strong>${formatNumber(row.totalMistakes)}</strong></span>
+        <span class="bar-cell"><span class="bar-track"><span class="bar-fill ${classColorClass(row.player.class)}" style="width:${width}%"></span></span><strong>${formatMistakeMetric(row, mode)}</strong></span>
         <span>${formatNumber(row.pullCount)}</span>
       </summary>
       <div class="night-mistake-breakdown">
