@@ -199,15 +199,16 @@ async function fetchAllEvents(token, { code, fightIds, dataType, startTime, endT
 }
 
 async function fetchEventBundle(token, { code, fightIds, startTime, endTime }) {
-  const [damageTaken, deaths, casts, interrupts, debuffs, combatantInfo] = await Promise.all([
+  const [damageTaken, deaths, casts, interrupts, debuffs, healing, combatantInfo] = await Promise.all([
     fetchAllEvents(token, { code, fightIds, dataType: "DamageTaken", startTime, endTime }),
     fetchAllEvents(token, { code, fightIds, dataType: "Deaths", startTime, endTime }),
     fetchAllEvents(token, { code, fightIds, dataType: "Casts", startTime, endTime }),
     fetchAllEvents(token, { code, fightIds, dataType: "Interrupts", startTime, endTime }),
     fetchAllEvents(token, { code, fightIds, dataType: "Debuffs", startTime, endTime }),
+    fetchAllEvents(token, { code, fightIds, dataType: "Healing", startTime, endTime }),
     fetchAllEvents(token, { code, fightIds, dataType: "CombatantInfo", startTime, endTime }),
   ]);
-  return { damageTaken, deaths, casts, interrupts, debuffs, combatantInfo };
+  return { damageTaken, deaths, casts, interrupts, debuffs, healing, combatantInfo };
 }
 
 export async function fetchLuraReportData(reportUrl = REPORT_URL) {
@@ -326,6 +327,7 @@ export function analyzeLuraData(data, options = {}) {
       nightCasts: data.bundle.casts.length,
       nightInterrupts: data.bundle.interrupts.length,
       nightDebuffs: data.bundle.debuffs.length,
+      nightHealing: (data.bundle.healing || []).length,
       nightCombatantInfo: data.bundle.combatantInfo.length,
     };
     output.wholeNight = {
@@ -342,7 +344,13 @@ export function analyzeLuraData(data, options = {}) {
         "outOfOrderInterrupts",
         "extraInterruptCasts",
       ]),
-      consumableLeaderboard: mergeRows(analyses.map((item) => item.lightsEndCausedLeaderboard), "totalWipesCaused", ["totalWipesCaused"]),
+      consumableLeaderboard: mergeRows(analyses.map((item) => item.consumableLeaderboard), "totalUses", [
+        "totalUses",
+        "healthstoneUses",
+        "healthPotionUses",
+        "healing",
+        "overheal",
+      ]),
       eggDamageLeaderboard: [],
       mistakeLeaderboard: buildMistakeLeaderboard(analyses),
       glaiveMistakeLeaderboard: buildMistakeLeaderboard(analyses, isGlaiveMistake),
@@ -358,6 +366,7 @@ export function analyzeLuraData(data, options = {}) {
     casts: selectedAnalysis.casts.length,
     interrupts: selectedAnalysis.interrupts.length,
     debuffs: selectedAnalysis.debuffs.length,
+    healing: selectedAnalysis.healing.length,
     combatantInfo: selectedAnalysis.combatantInfo.length,
   };
   output.summary = {
@@ -374,7 +383,7 @@ export function analyzeLuraData(data, options = {}) {
     eruptionInterruptLeaderboard: selectedAnalysis.interruptLeaderboard,
     interruptTimeline: selectedAnalysis.interruptTimeline,
     memoryActivations: selectedAnalysis.memoryActivations,
-    consumableLeaderboard: selectedAnalysis.lightsEndCausedLeaderboard,
+    consumableLeaderboard: selectedAnalysis.consumableLeaderboard,
     eggDamageLeaderboard: [],
   };
   return output;
@@ -386,11 +395,11 @@ function analyzeFight({ fight, bundle, actorById, abilityById, kickAssignments }
   const casts = bundle.casts.filter((event) => event.fight === fight.id);
   const interrupts = bundle.interrupts.filter((event) => event.fight === fight.id);
   const debuffs = bundle.debuffs.filter((event) => event.fight === fight.id);
+  const healing = (bundle.healing || []).filter((event) => event.fight === fight.id);
   const combatantInfo = bundle.combatantInfo.filter((event) => event.fight === fight.id);
   const presentPlayers = presentPlayersFromCombatantInfo(actorById, combatantInfo);
-  const crystalTimeline = buildCrystalTimeline(casts, debuffs, actorById);
   const terminateSequences = buildTerminateSequences({ fight, actorById, interrupts, kickAssignments });
-  const wipeFailures = buildWipeFailures({ fight, actorById, damageTaken, terminateSequences, crystalTimeline });
+  const wipeFailures = buildWipeFailures({ fight, actorById, damageTaken });
   const interruptTimeline = buildInterruptTimeline({
     fight,
     actorById,
@@ -412,6 +421,7 @@ function analyzeFight({ fight, bundle, actorById, abilityById, kickAssignments }
     casts,
     interrupts,
     debuffs,
+    healing,
     combatantInfo,
     presentPlayers,
     wipeFailures,
@@ -422,35 +432,18 @@ function analyzeFight({ fight, bundle, actorById, abilityById, kickAssignments }
     interruptTimeline,
     memoryActivations,
     interruptLeaderboard: buildInterruptLeaderboard({ actorById, presentPlayers, casts, interrupts, terminateSequences }),
-    lightsEndCausedLeaderboard: buildLightsEndCausedLeaderboard({ actorById, presentPlayers, wipeFailures }),
+    consumableLeaderboard: buildConsumableLeaderboard({ actorById, abilityById, presentPlayers, healingEvents: healing }),
   };
 }
 
-function buildWipeFailures({ fight, actorById, damageTaken, terminateSequences, crystalTimeline }) {
+function buildWipeFailures({ fight, actorById, damageTaken }) {
   const rows = [];
   rows.push(...groupWipeDamage({ fight, actorById, damageTaken, abilityIds: TERMINATE_IDS, mechanic: "Terminate", label: "Terminate not interrupted" }));
   rows.push(...groupWipeDamage({ fight, actorById, damageTaken, abilityIds: DISSONANCE_IDS, mechanic: "Dissonance", label: "Runes out of order" }));
   rows.push(...groupWipeDamage({ fight, actorById, damageTaken, abilityIds: new Set([SPELLS.naaruLament]), mechanic: "Naaru's Lament", label: "Tears not soaked" }));
   rows.push(...groupWipeDamage({ fight, actorById, damageTaken, abilityIds: new Set([SPELLS.cosmicFracture]), mechanic: "Cosmic Fracture", label: "Crystal not full healed" }));
   rows.push(...groupWipeDamage({ fight, actorById, damageTaken, abilityIds: new Set([SPELLS.radiance]), mechanic: "Radiance", label: "Crystal not held" }));
-
-  for (const group of groupWipeDamage({ fight, actorById, damageTaken, abilityIds: new Set([SPELLS.lightsEnd]), mechanic: "Light's End", label: "Crystal destroyed" })) {
-    const culprit = inferLightsEndCulprit(group.timestamp, crystalTimeline);
-    if (culprit) {
-      group.players = [actorMeta(actorById, culprit)];
-      group.attribution = "crystal_carrier";
-      group.evidence.unshift({
-        timestamp: group.timestamp,
-        time: group.time,
-        abilityId: SPELLS.dawnCrystal,
-        abilityName: "Dawn Crystal",
-        source: actorName(actorById, culprit),
-        target: "Missing crystal carrier",
-        amount: 0,
-      });
-    }
-    rows.push(group);
-  }
+  rows.push(...groupWipeDamage({ fight, actorById, damageTaken, abilityIds: new Set([SPELLS.lightsEnd]), mechanic: "Light's End", label: "Crystal destroyed" }));
 
   return rows.sort((a, b) => a.timestamp - b.timestamp);
 }
@@ -568,24 +561,6 @@ function buildMistakes({ fight, actorById, damageTaken, wipeFailures }) {
       deathLinkedLabel: label,
     });
   }
-  for (const failure of wipeFailures.filter((item) => item.mechanic === "Light's End" && item.players?.length === 1)) {
-    const player = failure.players[0];
-    mistakes.push({
-      id: `mistake-lights-end-${failure.timestamp}-${player.id}`,
-      category: "likely_mistake",
-      severity: "wipe",
-      label: "Light's End",
-      mechanic: "Light's End",
-      timestamp: failure.timestamp,
-      time: failure.time,
-      player,
-      abilityId: SPELLS.lightsEnd,
-      abilityName: "Light's End",
-      damageAmount: failure.raidDamageTotal || 0,
-      evidence: failure.evidence,
-      deathLinkedLabel: "Light's End",
-    });
-  }
   return [...collapseMistakes(mistakes), ...buildCriticalityOverlapMistakes({ fight, actorById, damageTaken })].sort(
     (a, b) => a.timestamp - b.timestamp,
   );
@@ -639,35 +614,6 @@ function collapseMistakes(mistakes) {
     groups.set(key, group);
   }
   return [...groups.values()].map((group) => ({ ...group, damageAmount: Math.round(group.damageAmount), evidence: group.evidence.slice(0, 6) }));
-}
-
-function buildCrystalTimeline(casts, debuffs, actorById) {
-  const holders = new Set();
-  const active = new Map();
-  const events = [];
-  for (const event of [...casts, ...debuffs].sort((a, b) => a.timestamp - b.timestamp)) {
-    if (abilityIdOf(event) !== SPELLS.dawnCrystal) continue;
-    const playerId = event.sourceID && actorById.get(event.sourceID)?.type === "Player" ? event.sourceID : event.targetID;
-    if (!playerId || actorById.get(playerId)?.type !== "Player") continue;
-    holders.add(playerId);
-    if (event.type === "removedebuff") active.delete(playerId);
-    else active.set(playerId, event.timestamp);
-    events.push({ timestamp: event.timestamp, playerId, type: event.type || "cast" });
-  }
-  return { holders, activeAt(timestamp) {
-    const activePlayers = new Set();
-    for (const event of events.filter((item) => item.timestamp <= timestamp).sort((a, b) => a.timestamp - b.timestamp)) {
-      if (event.type === "removedebuff") activePlayers.delete(event.playerId);
-      else activePlayers.add(event.playerId);
-    }
-    return activePlayers;
-  } };
-}
-
-function inferLightsEndCulprit(timestamp, crystalTimeline) {
-  const active = crystalTimeline.activeAt(timestamp);
-  const missing = [...crystalTimeline.holders].filter((playerId) => !active.has(playerId));
-  return missing.length === 1 ? missing[0] : null;
 }
 
 function buildTearsSoakLeaderboard({ actorById, presentPlayers, damageTaken }) {
@@ -1201,13 +1147,41 @@ function buildInterruptLeaderboard({ actorById, presentPlayers, casts, interrupt
   return sortRows(rows, "totalInterrupts");
 }
 
-function buildLightsEndCausedLeaderboard({ actorById, presentPlayers, wipeFailures }) {
-  const rows = initRows(actorById, presentPlayers, { totalWipesCaused: 0 });
-  for (const failure of wipeFailures.filter((item) => item.mechanic === "Light's End" && item.players?.length === 1)) {
-    const playerId = failure.players[0].id;
-    if (rows.has(playerId)) rows.get(playerId).totalWipesCaused += 1;
+function consumableTypeFor(name) {
+  if (/healthstone/i.test(name)) return "healthstone";
+  if (/(health|healing) potion/i.test(name)) return "healthPotion";
+  return null;
+}
+
+function buildConsumableLeaderboard({ actorById, abilityById, presentPlayers, healingEvents }) {
+  const rows = initRows(actorById, presentPlayers, {
+    totalUses: 0,
+    healthstoneUses: 0,
+    healthPotionUses: 0,
+    healing: 0,
+    overheal: 0,
+  });
+
+  for (const event of healingEvents) {
+    const consumableType = consumableTypeFor(abilityNameOf(event, abilityById));
+    if (!consumableType || !event.sourceID || event.sourceID !== event.targetID) continue;
+    if (!rows.has(event.sourceID)) continue;
+
+    const row = rows.get(event.sourceID);
+    row.totalUses += 1;
+    row.healing += event.amount || 0;
+    row.overheal += event.overheal || 0;
+    if (consumableType === "healthstone") row.healthstoneUses += 1;
+    if (consumableType === "healthPotion") row.healthPotionUses += 1;
   }
-  return sortRows(rows, "totalWipesCaused");
+
+  return [...rows.values()]
+    .sort((a, b) => b.totalUses - a.totalUses || b.healing - a.healing || a.player.name.localeCompare(b.player.name))
+    .map((row) => ({
+      ...row,
+      healing: Math.round(row.healing),
+      overheal: Math.round(row.overheal),
+    }));
 }
 
 function initRows(actorById, players, fields) {
@@ -1410,6 +1384,11 @@ function playerMergeKey(player) {
 
 function abilityIdOf(event) {
   return event.abilityGameID ?? event.ability?.gameID ?? event.ability?.guid ?? null;
+}
+
+function abilityNameOf(event, abilityById) {
+  const abilityId = abilityIdOf(event);
+  return abilityById?.get(abilityId)?.name || ABILITY_NAMES[abilityId] || event.ability?.name || `Ability ${abilityId}`;
 }
 
 function evidenceForDamageEvent({ event, fight, actorById }) {

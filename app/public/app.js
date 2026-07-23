@@ -133,7 +133,7 @@ const bossLabels = {
     interrupts: "Terminate Timeline",
     nightInterrupts: "Terminate Interrupts",
     symbolCalls: "Memory Game",
-    consumables: "Light's End Wipes Caused",
+    consumables: "Healthstone / Potions",
     eggDamage: "",
     glaiveMistakes: "Hit By Glaive",
   },
@@ -670,7 +670,9 @@ function applyBossLabels(bossKey) {
   document.querySelectorAll(".glaive-panel").forEach((panel) => {
     panel.classList.toggle("is-hidden", !labels.glaiveMistakes);
   });
-  els.consumables.closest(".panel").classList.toggle("is-hidden", bossKey === "lura");
+  els.consumables.closest(".panel").classList.remove("is-hidden");
+  els.nightConsumables.closest(".panel").classList.remove("is-hidden");
+  els.allProgConsumables.closest(".panel").classList.remove("is-hidden");
   document.querySelectorAll(".mini-toggle").forEach((toggle) => {
     toggle.classList.toggle("is-hidden", bossKey === "lura");
   });
@@ -718,6 +720,7 @@ function renderNightDashboard(night) {
 }
 
 function renderNightPlaceholder() {
+  const labels = activeBossLabels();
   els.nightSummaryGrid.innerHTML = "";
   els.nightMistakeCount.textContent = 0;
   els.nightGlaiveCount.textContent = 0;
@@ -730,11 +733,11 @@ function renderNightPlaceholder() {
   els.nightMistakes.innerHTML = empty("Loading night-wide mistakes.");
   els.nightGlaives.innerHTML = empty("Loading night-wide glaive hits.");
   els.nightGlaiveTrend.innerHTML = empty("Loading night-wide glaive trend.");
-  els.nightEchoSoaks.innerHTML = empty("Loading night-wide soaks.");
-  els.nightQuillSoaks.innerHTML = empty("Loading night-wide quill soaks.");
-  els.nightEruptionInterrupts.innerHTML = empty("Loading night-wide interrupts.");
-  els.nightEggDamage.innerHTML = empty("Loading night-wide egg damage.");
-  els.nightConsumables.innerHTML = empty("Loading night-wide consumable usage.");
+  els.nightEchoSoaks.innerHTML = empty(loadingPanelText("night-wide", labels.echo));
+  els.nightQuillSoaks.innerHTML = empty(loadingPanelText("night-wide", labels.quill));
+  els.nightEruptionInterrupts.innerHTML = empty(loadingPanelText("night-wide", labels.nightInterrupts || labels.interrupts));
+  els.nightEggDamage.innerHTML = empty(loadingPanelText("night-wide", labels.eggDamage || "damage"));
+  els.nightConsumables.innerHTML = empty(loadingPanelText("night-wide", labels.consumables));
 }
 
 function renderAllProgDashboard(allProg) {
@@ -775,6 +778,7 @@ function renderAllProgDashboard(allProg) {
 }
 
 function renderAllProgPlaceholder() {
+  const labels = activeBossLabels();
   els.allProgSummaryGrid.innerHTML = "";
   els.allProgMistakeCount.textContent = 0;
   els.allProgGlaiveCount.textContent = 0;
@@ -787,11 +791,19 @@ function renderAllProgPlaceholder() {
   els.allProgMistakes.innerHTML = empty("Loading all-prog mistakes.");
   els.allProgGlaives.innerHTML = empty("Loading all-prog glaive hits.");
   els.allProgGlaiveTrend.innerHTML = empty("Loading all-prog glaive trend.");
-  els.allProgEchoSoaks.innerHTML = empty("Loading all-prog soaks.");
-  els.allProgQuillSoaks.innerHTML = empty("Loading all-prog quill soaks.");
-  els.allProgEruptionInterrupts.innerHTML = empty("Loading all-prog interrupts.");
-  els.allProgEggDamage.innerHTML = empty("Loading all-prog egg damage.");
-  els.allProgConsumables.innerHTML = empty("Loading all-prog consumable usage.");
+  els.allProgEchoSoaks.innerHTML = empty(loadingPanelText("all-prog", labels.echo));
+  els.allProgQuillSoaks.innerHTML = empty(loadingPanelText("all-prog", labels.quill));
+  els.allProgEruptionInterrupts.innerHTML = empty(loadingPanelText("all-prog", labels.nightInterrupts || labels.interrupts));
+  els.allProgEggDamage.innerHTML = empty(loadingPanelText("all-prog", labels.eggDamage || "damage"));
+  els.allProgConsumables.innerHTML = empty(loadingPanelText("all-prog", labels.consumables));
+}
+
+function activeBossLabels() {
+  return bossLabels[currentBossKey] || bossLabels.beloren;
+}
+
+function loadingPanelText(scope, label) {
+  return `Loading ${scope} ${label}.`;
 }
 
 function renderPullOptions(pulls, selectedFightId, requestedPullId = pullSelect.value || "latest") {
@@ -1571,10 +1583,7 @@ function renderEggDamage(rows) {
 }
 
 function renderConsumables(rows) {
-  if (!rows.length) return empty(currentBossKey === "lura" ? "No Light's End wipe causes inferred." : "No healthstone or health potion usage detected.");
-  if (currentBossKey === "lura") {
-    return leaderboardBars(rows, "totalWipesCaused", (row) => [`Wipes ${formatNumber(row.totalWipesCaused)}`]);
-  }
+  if (!rows.length) return empty("No healthstone or health potion usage detected.");
   return leaderboardBars(
     rows,
     "totalUses",
@@ -1589,7 +1598,8 @@ function renderConsumables(rows) {
 function renderNightMistakes(rows, { mode = "total", emptyMessage = null } = {}) {
   if (!rows.length) return empty(emptyMessage || (bossLabels[currentBossKey] || bossLabels.beloren).mistakesEmpty);
   const sortedRows = sortedMistakeRows(rows, mode);
-  const max = Math.max(...sortedRows.map((row) => mistakeMetricValue(row, mode)), 1);
+  const highestMetric = Math.max(...sortedRows.map((row) => mistakeMetricValue(row, mode)), 0);
+  const max = highestMetric > 0 ? highestMetric : 1;
   const metricLabel = mode === "per-attempt" ? "Per att" : "Total";
   return `<div class="night-mistake-list">
     <div class="night-mistake-header">
