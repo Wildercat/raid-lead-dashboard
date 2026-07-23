@@ -125,10 +125,10 @@ query ReportShell($code: String!) {
 }`;
 
 const EVENTS_QUERY = `
-query ReportEvents($code: String!, $fightIDs: [Int], $dataType: EventDataType, $startTime: Float, $endTime: Float, $limit: Int) {
+query ReportEvents($code: String!, $fightIDs: [Int], $dataType: EventDataType, $abilityID: Float, $startTime: Float, $endTime: Float, $limit: Int) {
   reportData {
     report(code: $code) {
-      events(fightIDs: $fightIDs, dataType: $dataType, startTime: $startTime, endTime: $endTime, limit: $limit) {
+      events(fightIDs: $fightIDs, dataType: $dataType, abilityID: $abilityID, startTime: $startTime, endTime: $endTime, limit: $limit) {
         data
         nextPageTimestamp
       }
@@ -185,11 +185,11 @@ async function graphql(token, query, variables) {
   return body.data;
 }
 
-async function fetchAllEvents(token, { code, fightIds, dataType, startTime, endTime }) {
+async function fetchAllEvents(token, { code, fightIds, dataType, abilityID = null, startTime, endTime }) {
   const events = [];
   let pageStart = startTime;
   while (true) {
-    const data = await graphql(token, EVENTS_QUERY, { code, fightIDs: fightIds, dataType, startTime: pageStart, endTime, limit: 10000 });
+    const data = await graphql(token, EVENTS_QUERY, { code, fightIDs: fightIds, dataType, abilityID, startTime: pageStart, endTime, limit: 10000 });
     const page = data.reportData.report.events;
     events.push(...(page.data || []));
     if (!page.nextPageTimestamp || page.nextPageTimestamp >= endTime) break;
@@ -198,17 +198,26 @@ async function fetchAllEvents(token, { code, fightIds, dataType, startTime, endT
   return events;
 }
 
-async function fetchEventBundle(token, { code, fightIds, startTime, endTime }) {
+async function fetchEventBundle(token, { code, fightIds, startTime, endTime, consumableAbilityIds = [] }) {
   const [damageTaken, deaths, casts, interrupts, debuffs, healing, combatantInfo] = await Promise.all([
     fetchAllEvents(token, { code, fightIds, dataType: "DamageTaken", startTime, endTime }),
     fetchAllEvents(token, { code, fightIds, dataType: "Deaths", startTime, endTime }),
     fetchAllEvents(token, { code, fightIds, dataType: "Casts", startTime, endTime }),
     fetchAllEvents(token, { code, fightIds, dataType: "Interrupts", startTime, endTime }),
     fetchAllEvents(token, { code, fightIds, dataType: "Debuffs", startTime, endTime }),
-    fetchAllEvents(token, { code, fightIds, dataType: "Healing", startTime, endTime }),
+    fetchConsumableHealingEvents(token, { code, fightIds, abilityIds: consumableAbilityIds, startTime, endTime }),
     fetchAllEvents(token, { code, fightIds, dataType: "CombatantInfo", startTime, endTime }),
   ]);
   return { damageTaken, deaths, casts, interrupts, debuffs, healing, combatantInfo };
+}
+
+async function fetchConsumableHealingEvents(token, { code, fightIds, abilityIds, startTime, endTime }) {
+  const ids = [...new Set(abilityIds.map(Number).filter(Number.isFinite))];
+  if (!ids.length) return [];
+  const batches = await Promise.all(
+    ids.map((abilityID) => fetchAllEvents(token, { code, fightIds, dataType: "Healing", abilityID, startTime, endTime })),
+  );
+  return batches.flat().sort((a, b) => a.timestamp - b.timestamp);
 }
 
 export async function fetchLuraReportData(reportUrl = REPORT_URL) {
@@ -216,6 +225,7 @@ export async function fetchLuraReportData(reportUrl = REPORT_URL) {
   const token = await getAccessToken();
   const shell = await graphql(token, REPORT_SHELL_QUERY, { code: reportCode });
   const report = shell.reportData.report;
+  const consumableAbilityIds = consumableAbilityIdsFromReport(report);
   const luraFights = report.fights.filter((fight) => fight.encounterID === LURA_ENCOUNTER_ID).sort((a, b) => a.id - b.id);
   if (!luraFights.length) throw new Error("No Midnight Falls pulls found in the report.");
   const bundle = await fetchEventBundle(token, {
@@ -223,6 +233,7 @@ export async function fetchLuraReportData(reportUrl = REPORT_URL) {
     fightIds: luraFights.map((fight) => fight.id),
     startTime: Math.min(...luraFights.map((fight) => fight.startTime)),
     endTime: Math.max(...luraFights.map((fight) => fight.endTime)),
+    consumableAbilityIds,
   });
   return { reportUrl, reportCode, requestedFightId: fightId, report, bundle };
 }
@@ -232,6 +243,7 @@ export async function fetchLuraFightData(reportUrl = REPORT_URL, fightIds = []) 
   const token = await getAccessToken();
   const shell = await graphql(token, REPORT_SHELL_QUERY, { code: reportCode });
   const report = shell.reportData.report;
+  const consumableAbilityIds = consumableAbilityIdsFromReport(report);
   const idSet = new Set(fightIds.map(Number).filter(Number.isFinite));
   const luraFights = report.fights
     .filter((fight) => fight.encounterID === LURA_ENCOUNTER_ID && idSet.has(fight.id))
@@ -242,6 +254,7 @@ export async function fetchLuraFightData(reportUrl = REPORT_URL, fightIds = []) 
     fightIds: luraFights.map((fight) => fight.id),
     startTime: Math.min(...luraFights.map((fight) => fight.startTime)),
     endTime: Math.max(...luraFights.map((fight) => fight.endTime)),
+    consumableAbilityIds,
   });
   return { reportUrl, reportCode, requestedFightId: fightId, report, bundle };
 }
@@ -1151,6 +1164,13 @@ function consumableTypeFor(name) {
   if (/healthstone/i.test(name)) return "healthstone";
   if (/(health|healing) potion/i.test(name)) return "healthPotion";
   return null;
+}
+
+function consumableAbilityIdsFromReport(report) {
+  return (report.masterData?.abilities || [])
+    .filter((ability) => consumableTypeFor(ability.name))
+    .map((ability) => ability.gameID)
+    .filter(Boolean);
 }
 
 function buildConsumableLeaderboard({ actorById, abilityById, presentPlayers, healingEvents }) {
