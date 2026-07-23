@@ -273,6 +273,27 @@ h2 {
   margin-bottom: 8px;
 }
 
+.aggregate-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+  margin-bottom: 8px;
+}
+
+.aggregate-toolbar .summary-grid {
+  margin-bottom: 0;
+}
+
+.aggregate-toolbar .scan-now-button {
+  min-width: 76px;
+}
+
+.scan-now-button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
 .summary-grid-rest {
   display: contents;
 }
@@ -450,6 +471,13 @@ h2 {
   justify-content: space-between;
   gap: 10px;
   margin-bottom: 7px;
+}
+
+.panel-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
 }
 
 .mini-toggle {
@@ -1521,6 +1549,15 @@ td strong {
   min-height: 170px;
 }
 
+.trend-chart.is-compact svg {
+  width: 100%;
+  min-width: 0;
+}
+
+.trend-chart.is-expanded svg {
+  width: max-content;
+}
+
 .trend-axis {
   stroke: var(--line);
   stroke-width: 1;
@@ -1544,18 +1581,26 @@ td strong {
   opacity: 0.45;
 }
 
-.trend-normalized-line {
+.trend-player-line {
   fill: none;
-  stroke: var(--danger);
-  stroke-width: 2.5;
+  stroke: currentColor;
+  stroke-width: 1.8;
   stroke-linecap: round;
   stroke-linejoin: round;
+  opacity: 0.62;
 }
 
 .trend-dot {
   fill: var(--info);
   stroke: var(--surface);
   stroke-width: 1.5;
+}
+
+.trend-player-dot {
+  fill: currentColor;
+  stroke: var(--surface);
+  stroke-width: 1;
+  opacity: 0.8;
 }
 
 .trend-legend {
@@ -1580,11 +1625,95 @@ td strong {
   background: var(--info);
 }
 
-.legend-line {
-  width: 16px;
-  height: 2px;
+.trend-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+}
+
+.trend-modal.is-hidden {
+  display: none;
+}
+
+.trend-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  background: color-mix(in srgb, var(--bg) 76%, transparent);
+}
+
+.trend-modal-panel {
+  position: relative;
+  z-index: 1;
+  width: min(1120px, calc(100vw - 32px));
+  max-height: calc(100vh - 40px);
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.32);
+  padding: 14px;
+}
+
+.trend-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.trend-modal-header h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.icon-button {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.trend-player-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.trend-player-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
   border-radius: 999px;
-  background: var(--danger);
+  background: var(--panel);
+  color: var(--muted);
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.trend-player-toggle.is-active {
+  border-color: color-mix(in srgb, var(--info) 35%, var(--line));
+  color: var(--text);
+  background: color-mix(in srgb, var(--info) 8%, var(--panel));
+}
+
+.trend-player-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: currentColor;
 }
 
 .empty {

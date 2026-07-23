@@ -16,7 +16,7 @@ const ROOT = fileURLToPath(new URL(".", import.meta.url));
 const PUBLIC_ROOT = join(ROOT, "public");
 const DATA_CACHE_ROOT = process.env.DATA_CACHE_DIR || join(ROOT, "..", ".data-cache");
 const CHAT_LOG_PATH = process.env.CHAT_LOG_PATH || "C:\\Users\\Abram Gornik\\Documents\\WowChatLog.txt";
-const STORE_VERSION = 19;
+const STORE_VERSION = 20;
 const ENCOUNTER_ID_BELOREN = 3182;
 const ALLOWED_ALL_PROG_GUILD_IDS = new Set([811453, 713862]);
 const SHARED_SCAN_WCL_INTERVAL_MS = 5000;
@@ -1119,6 +1119,7 @@ function mergeGlaiveHitsByNight(stores) {
               : combatMinutes > 0
                 ? totalHits / combatMinutes
                 : 0,
+          players: existing.players || [],
         };
       }
 
@@ -1134,6 +1135,7 @@ function mergeGlaiveHitsByNight(stores) {
         totalHits,
         combatDurationMs,
         glaiveHitsPerMinute: combatMinutes > 0 ? totalHits / combatMinutes : 0,
+        players: [],
         absoluteStartTime: Number(store.report?.pulls?.slice(-1)[0]?.absoluteStartTime || pulls[0]?.absoluteStartTime || 0),
       };
     })

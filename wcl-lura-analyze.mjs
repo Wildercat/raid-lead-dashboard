@@ -26,12 +26,16 @@ const SPELLS = {
   tearsOfLura: 1254257,
   lightsEnd: 1284699,
   cosmicFracture: 1251789,
+  radiance: 1282458,
   heavensGlaivesA: 1253915,
   heavensGlaivesB: 1254076,
   darkQuasarA: 1282469,
   darkQuasarB: 1282470,
   dawnCrystal: 1253050,
   cosmicBolt: 1281764,
+  criticalityA: 1281184,
+  criticalityB: 1281178,
+  chargedCore: 1282375,
 };
 
 const TERMINATE_IDS = new Set([SPELLS.terminateA, SPELLS.terminateB, SPELLS.terminateC]);
@@ -39,6 +43,14 @@ const RESONANCE_IDS = new Set([SPELLS.resonance]);
 const DISSONANCE_IDS = new Set([SPELLS.dissonanceA, SPELLS.dissonanceB]);
 const GLAIVE_IDS = new Set([SPELLS.heavensGlaivesA, SPELLS.heavensGlaivesB]);
 const QUASAR_IDS = new Set([SPELLS.darkQuasarA, SPELLS.darkQuasarB]);
+const CRITICALITY_IDS = new Set([SPELLS.criticalityA, SPELLS.criticalityB]);
+const DIRECT_DAMAGE_MISTAKES = new Map([
+  [SPELLS.heavensGlaivesA, { label: "Hit by glaive", mechanic: "Heaven's Glaives" }],
+  [SPELLS.heavensGlaivesB, { label: "Hit by glaive", mechanic: "Heaven's Glaives" }],
+  [SPELLS.darkQuasarA, { label: "Hit by beam", mechanic: "Dark Quasar" }],
+  [SPELLS.darkQuasarB, { label: "Hit by beam", mechanic: "Dark Quasar" }],
+  [SPELLS.chargedCore, { label: "Stood in wrong p2 beam", mechanic: "Charged Core" }],
+]);
 const RAID_MARKERS = new Map([
   [1, "Star"],
   [2, "Circle"],
@@ -55,6 +67,7 @@ const WIPE_DAMAGE_IDS = new Set([
   SPELLS.naaruLament,
   SPELLS.lightsEnd,
   SPELLS.cosmicFracture,
+  SPELLS.radiance,
 ]);
 
 const ABILITY_NAMES = {
@@ -68,12 +81,16 @@ const ABILITY_NAMES = {
   [SPELLS.tearsOfLura]: "Tears of L'ura",
   [SPELLS.lightsEnd]: "Light's End",
   [SPELLS.cosmicFracture]: "Cosmic Fracture",
+  [SPELLS.radiance]: "Radiance",
   [SPELLS.heavensGlaivesA]: "Heaven's Glaives",
   [SPELLS.heavensGlaivesB]: "Heaven's Glaives",
   [SPELLS.darkQuasarA]: "Dark Quasar",
   [SPELLS.darkQuasarB]: "Dark Quasar",
   [SPELLS.dawnCrystal]: "Dawn Crystal",
   [SPELLS.cosmicBolt]: "Cosmic Bolt",
+  [SPELLS.criticalityA]: "Criticality",
+  [SPELLS.criticalityB]: "Criticality",
+  [SPELLS.chargedCore]: "Charged Core",
 };
 
 const DEFAULT_KICK_ASSIGNMENTS = `Fartgrip Dreadknights Rhetorica Chairmanjeff
@@ -415,6 +432,7 @@ function buildWipeFailures({ fight, actorById, damageTaken, terminateSequences, 
   rows.push(...groupWipeDamage({ fight, actorById, damageTaken, abilityIds: DISSONANCE_IDS, mechanic: "Dissonance", label: "Runes out of order" }));
   rows.push(...groupWipeDamage({ fight, actorById, damageTaken, abilityIds: new Set([SPELLS.naaruLament]), mechanic: "Naaru's Lament", label: "Tears not soaked" }));
   rows.push(...groupWipeDamage({ fight, actorById, damageTaken, abilityIds: new Set([SPELLS.cosmicFracture]), mechanic: "Cosmic Fracture", label: "Crystal not full healed" }));
+  rows.push(...groupWipeDamage({ fight, actorById, damageTaken, abilityIds: new Set([SPELLS.radiance]), mechanic: "Radiance", label: "Crystal not held" }));
 
   for (const group of groupWipeDamage({ fight, actorById, damageTaken, abilityIds: new Set([SPELLS.lightsEnd]), mechanic: "Light's End", label: "Crystal destroyed" })) {
     const culprit = inferLightsEndCulprit(group.timestamp, crystalTimeline);
@@ -531,9 +549,9 @@ function buildMistakes({ fight, actorById, damageTaken, wipeFailures }) {
   const mistakes = [];
   for (const event of damageTaken) {
     const abilityId = abilityIdOf(event);
-    if (!GLAIVE_IDS.has(abilityId) && !QUASAR_IDS.has(abilityId)) continue;
-    const label = GLAIVE_IDS.has(abilityId) ? "Hit by glaive" : "Hit by beam";
-    const mechanic = GLAIVE_IDS.has(abilityId) ? "Heaven's Glaives" : "Dark Quasar";
+    const mistakeMeta = DIRECT_DAMAGE_MISTAKES.get(abilityId);
+    if (!mistakeMeta) continue;
+    const { label, mechanic } = mistakeMeta;
     mistakes.push({
       id: `mistake-${abilityId}-${event.timestamp}-${event.targetID}`,
       category: "likely_mistake",
@@ -568,7 +586,45 @@ function buildMistakes({ fight, actorById, damageTaken, wipeFailures }) {
       deathLinkedLabel: "Light's End",
     });
   }
-  return collapseMistakes(mistakes).sort((a, b) => a.timestamp - b.timestamp);
+  return [...collapseMistakes(mistakes), ...buildCriticalityOverlapMistakes({ fight, actorById, damageTaken })].sort(
+    (a, b) => a.timestamp - b.timestamp,
+  );
+}
+
+function buildCriticalityOverlapMistakes({ fight, actorById, damageTaken }) {
+  const groups = new Map();
+  for (const event of damageTaken) {
+    const abilityId = abilityIdOf(event);
+    if (!CRITICALITY_IDS.has(abilityId)) continue;
+    if (!event.targetID || actorById.get(event.targetID)?.type !== "Player") continue;
+    const key = `${event.targetID}:${event.timestamp}`;
+    const group = groups.get(key) || [];
+    group.push(event);
+    groups.set(key, group);
+  }
+
+  return [...groups.values()]
+    .filter((events) => events.length > 1)
+    .map((events) => {
+      const event = events[0];
+      const damageAmount = events.reduce((total, item) => total + Number(item.amount || 0), 0);
+      return {
+        id: `mistake-criticality-overlap-${event.timestamp}-${event.targetID}`,
+        category: "likely_mistake",
+        severity: "high",
+        label: "Overlapped Criticality",
+        mechanic: "Criticality",
+        timestamp: event.timestamp,
+        time: formatTime(event.timestamp - fight.startTime),
+        player: actorMeta(actorById, event.targetID),
+        abilityId: abilityIdOf(event),
+        abilityName: "Criticality",
+        damageAmount: Math.round(damageAmount),
+        evidence: events.slice(0, 6).map((item) => evidenceForDamageEvent({ event: item, fight, actorById })),
+        tickCount: events.length,
+        deathLinkedLabel: "Overlapped Criticality",
+      };
+    });
 }
 
 function collapseMistakes(mistakes) {
@@ -1239,9 +1295,45 @@ function buildGlaiveHitsByNight(analyses, report, fightNumberById) {
       totalHits,
       combatDurationMs,
       glaiveHitsPerMinute: combatMinutes > 0 ? totalHits / combatMinutes : 0,
+      players: buildGlaivePlayerNightRates(analyses),
       absoluteStartTime: report.startTime + (analyses[0]?.fight?.startTime || 0),
     },
   ];
+}
+
+function buildGlaivePlayerNightRates(analyses) {
+  const rows = new Map();
+  for (const analysis of analyses) {
+    const combatDurationMs = analysis.fight.endTime - analysis.fight.startTime;
+    for (const player of analysis.presentPlayers) {
+      const key = playerMergeKey(player);
+      const row = rows.get(key) || { player, totalHits: 0, pullCount: 0, combatDurationMs: 0 };
+      row.pullCount += 1;
+      row.combatDurationMs += combatDurationMs;
+      rows.set(key, row);
+    }
+    for (const mistake of analysis.mistakes.filter(isGlaiveMistake)) {
+      const key = playerMergeKey(mistake.player);
+      const row = rows.get(key);
+      if (!row) continue;
+      row.totalHits += 1;
+    }
+  }
+
+  return [...rows.values()]
+    .map((row) => ({
+      player: row.player,
+      totalHits: row.totalHits,
+      pullCount: row.pullCount,
+      combatDurationMs: row.combatDurationMs,
+      glaiveHitsPerMinute: row.combatDurationMs > 0 ? row.totalHits / (row.combatDurationMs / 60000) : 0,
+    }))
+    .sort(
+      (a, b) =>
+        Number(b.glaiveHitsPerMinute || 0) - Number(a.glaiveHitsPerMinute || 0) ||
+        Number(b.totalHits || 0) - Number(a.totalHits || 0) ||
+        a.player.name.localeCompare(b.player.name),
+    );
 }
 
 function buildDeaths({ fight, actorById, deaths, damageEvents, mistakes }) {

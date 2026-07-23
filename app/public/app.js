@@ -19,6 +19,10 @@ let liveScanTimedOut = false;
 let currentBossKey = "beloren";
 let selectedTerminateSpawnSetId = null;
 let selectedMemorySequenceId = null;
+let activeTrendScope = null;
+let visibleTrendPlayers = new Set();
+let showOverallTrend = true;
+let suppressUrlStateUpdate = false;
 const ALL_PROG_GUILD_IDS = new Set([811453, 713862]);
 const LAST_REPORT_URL_KEY = "beloren-dashboard:last-report-url";
 const LURA_KICK_ORDER_KEY = "beloren-dashboard:lura-kick-order";
@@ -69,6 +73,13 @@ const els = {
   liveScanToggle: document.querySelector("#live-scan-toggle"),
   liveLogLabel: document.querySelector("#live-log-label"),
   forceScanButton: document.querySelector("#force-scan-button"),
+  refreshNightButton: document.querySelector("#refresh-night-button"),
+  refreshAllProgButton: document.querySelector("#refresh-all-prog-button"),
+  trendModal: document.querySelector("#trend-modal"),
+  trendModalTitle: document.querySelector("#trend-modal-title"),
+  trendPlayerToggles: document.querySelector("#trend-player-toggles"),
+  trendModalChart: document.querySelector("#trend-modal-chart"),
+  trendModalClose: document.querySelector("#trend-modal-close"),
   reportLink: document.querySelector("#report-link"),
   statusTabs: document.querySelector("#status-tabs"),
   allProgTabButton: document.querySelector("#all-prog-tab-button"),
@@ -128,13 +139,15 @@ const bossLabels = {
   },
 };
 
-const lastReportUrl = localStorage.getItem(LAST_REPORT_URL_KEY);
-if (lastReportUrl) reportUrlInput.value = lastReportUrl;
-setStatus(lastReportUrl ? "Ready." : "Paste a Warcraft Logs report URL to start.");
+const initialUrlState = parseUrlState();
+const initialReportUrl = initialUrlState.reportUrl || localStorage.getItem(LAST_REPORT_URL_KEY);
+if (initialReportUrl) reportUrlInput.value = initialReportUrl;
+setStatus(initialReportUrl ? "Ready." : "Paste a Warcraft Logs report URL to start.");
 
 document.querySelectorAll(".tab").forEach((button) => {
   button.addEventListener("click", async () => {
     setActiveTab(button.dataset.tab);
+    updateUrlState();
 
     if (button.dataset.tab === "night") {
       await loadWholeNight(reportUrlInput.value.trim());
@@ -150,11 +163,14 @@ form.addEventListener("submit", async (event) => {
   setActiveTab("latest");
   const reportUrl = reportUrlInput.value.trim();
   if (reportUrl) localStorage.setItem(LAST_REPORT_URL_KEY, reportUrl);
+  updateUrlState({ tab: "latest", fightId: null });
   await analyze(reportUrl, "latest");
 });
 
 pullSelect.addEventListener("change", async () => {
   if (pullSelect.disabled) return;
+  setActiveTab("latest");
+  updateUrlState({ tab: "latest", fightId: pullSelect.value === "latest" ? null : pullSelect.value });
   await analyze(reportUrlInput.value.trim(), pullSelect.value);
 });
 
@@ -172,6 +188,57 @@ els.liveScanToggle.addEventListener("change", () => {
 
 els.forceScanButton.addEventListener("click", async () => {
   await scanForNewPull({ forced: true });
+});
+
+els.refreshNightButton.addEventListener("click", async () => {
+  await loadWholeNight(reportUrlInput.value.trim(), { fresh: true });
+});
+
+els.refreshAllProgButton.addEventListener("click", async () => {
+  await loadAllProg(reportUrlInput.value.trim(), { fresh: true });
+});
+
+document.querySelectorAll(".trend-expand-button").forEach((button) => {
+  button.addEventListener("click", () => openTrendModal(button.dataset.trendScope));
+});
+
+els.trendModalClose.addEventListener("click", closeTrendModal);
+els.trendModal.addEventListener("click", (event) => {
+  if (event.target.matches("[data-close-trend-modal]")) closeTrendModal();
+  const overallToggle = event.target.closest(".trend-overall-toggle");
+  if (overallToggle) {
+    if (event.altKey) {
+      isolateOverallTrend();
+      return;
+    }
+    showOverallTrend = !showOverallTrend;
+    renderTrendModal();
+    return;
+  }
+  const selectAllToggle = event.target.closest(".trend-select-all-toggle");
+  if (selectAllToggle) {
+    selectAllTrendSeries();
+    return;
+  }
+  const toggle = event.target.closest(".trend-player-toggle");
+  if (!toggle) return;
+  const key = toggle.dataset.playerKey;
+  if (!key) return;
+  if (event.altKey) {
+    isolateTrendPlayer(key);
+    return;
+  }
+  if (visibleTrendPlayers.has(key)) visibleTrendPlayers.delete(key);
+  else visibleTrendPlayers.add(key);
+  renderTrendModal();
+});
+
+els.trendModal.addEventListener("dblclick", (event) => {
+  const toggle = event.target.closest(".trend-player-toggle");
+  if (!toggle || toggle.classList.contains("trend-overall-toggle")) return;
+  const key = toggle.dataset.playerKey;
+  if (!key) return;
+  isolateTrendPlayer(key);
 });
 
 els.eruptionInterrupts.addEventListener("change", (event) => {
@@ -214,7 +281,13 @@ document.querySelectorAll(".mistake-rate-toggle input").forEach((toggle) => {
   });
 });
 
-async function analyze(reportUrl, pullId = pullSelect.value || "latest") {
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !els.trendModal.classList.contains("is-hidden")) closeTrendModal();
+});
+
+initializeFromUrlState(initialUrlState);
+
+async function analyze(reportUrl, pullId = pullSelect.value || "latest", { skipUrlUpdate = false } = {}) {
   if (!reportUrl) {
     setStatus("Paste a Warcraft Logs report URL to start.");
     return;
@@ -223,16 +296,19 @@ async function analyze(reportUrl, pullId = pullSelect.value || "latest") {
   const cacheKey = pullCacheKey(reportUrl, pullId);
   if (pullCache.has(cacheKey)) {
     const cached = pullCache.get(cacheKey);
+    cached.requestedPullId = pullId;
     renderDashboard(cached);
     setStatus(cached.report.title);
     dashboardEl.classList.remove("is-empty");
     els.statusTabs.classList.remove("is-hidden");
     els.liveLogControl.classList.remove("is-hidden");
+    if (!skipUrlUpdate) updateUrlState({ tab: activeTab, fightId: pullId === "latest" ? null : cached.fight.id });
     return;
   }
 
   try {
     const payload = await fetchAnalysis({ reportUrl, pullId, scope: "pull" });
+    payload.requestedPullId = pullId;
 
     pullCache.set(cacheKey, payload);
     pullCache.set(pullCacheKey(reportUrl, payload.fight.id), payload);
@@ -241,6 +317,7 @@ async function analyze(reportUrl, pullId = pullSelect.value || "latest") {
     dashboardEl.classList.remove("is-empty");
     els.statusTabs.classList.remove("is-hidden");
     els.liveLogControl.classList.remove("is-hidden");
+    if (!skipUrlUpdate) updateUrlState({ tab: activeTab, fightId: pullId === "latest" ? null : payload.fight.id });
   } catch (error) {
     setStatus(error.message, { error: true });
   }
@@ -270,50 +347,80 @@ async function fetchScan({ reportUrl, force = false }) {
   return payload;
 }
 
-async function loadWholeNight(reportUrl) {
+async function loadWholeNight(reportUrl, { fresh = false } = {}) {
   if (!reportUrl || dashboardEl.classList.contains("is-empty")) return;
   const cacheKey = nightCacheKey(reportUrl);
-  if (nightCache.has(cacheKey)) {
+  if (!fresh && nightCache.has(cacheKey)) {
     const cached = nightCache.get(cacheKey);
     renderNightDashboard(cached.wholeNight);
     setStatus(cached.report.title);
+    updateUrlState({ tab: "night", fightId: null });
     return;
   }
 
-  setStatus("Fetching whole-night events...", { loading: true });
+  if (fresh) {
+    nightCache.delete(cacheKey);
+    allProgCache.delete(allProgCacheKey(reportUrl));
+  }
+
+  setRefreshButtonState(els.refreshNightButton, fresh);
+  setStatus(fresh ? "Refreshing whole-night events..." : "Fetching whole-night events...", { loading: true });
 
   try {
-    const payload = await fetchAnalysis({ reportUrl, scope: "night" });
+    const payload = await fetchAnalysis({ reportUrl, scope: "night", fresh });
     spellMap = payload.spells || spellMap;
     nightCache.set(cacheKey, payload);
     renderNightDashboard(payload.wholeNight);
+    if (payload.report?.pulls && currentPullData?.fight) renderPullOptions(payload.report.pulls, currentPullData.fight.id);
     setStatus(payload.report.title);
+    updateUrlState({ tab: "night", fightId: null });
   } catch (error) {
     setStatus(error.message, { error: true });
+  } finally {
+    setRefreshButtonState(els.refreshNightButton, false);
   }
 }
 
-async function loadAllProg(reportUrl, { discoverReports = false } = {}) {
+async function loadAllProg(reportUrl, { discoverReports = false, fresh = false } = {}) {
   if (!reportUrl || dashboardEl.classList.contains("is-empty") || els.allProgTabButton.classList.contains("is-hidden")) return;
   const cacheKey = allProgCacheKey(reportUrl);
-  if (!discoverReports && allProgCache.has(cacheKey)) {
+  if (!discoverReports && !fresh && allProgCache.has(cacheKey)) {
     const cached = allProgCache.get(cacheKey);
     renderAllProgDashboard(cached.allProg);
     setStatus(cached.report.title);
+    updateUrlState({ tab: "all-prog", fightId: null });
     return;
   }
 
-  setStatus(discoverReports ? "Finding guild reports..." : "Loading cached all-prog data...", { loading: true });
+  if (fresh) {
+    allProgCache.delete(cacheKey);
+    nightCache.delete(nightCacheKey(reportUrl));
+  }
+
+  setRefreshButtonState(els.refreshAllProgButton, fresh);
+  setStatus(
+    fresh ? "Refreshing all-prog data..." : discoverReports ? "Finding guild reports..." : "Loading cached all-prog data...",
+    { loading: true },
+  );
 
   try {
-    const payload = await fetchAnalysis({ reportUrl, scope: "prog", discoverReports });
+    const payload = await fetchAnalysis({ reportUrl, scope: "prog", discoverReports, fresh });
     spellMap = payload.spells || spellMap;
     allProgCache.set(cacheKey, payload);
     renderAllProgDashboard(payload.allProg);
     setStatus(payload.report.title);
+    updateUrlState({ tab: "all-prog", fightId: null });
   } catch (error) {
     setStatus(error.message, { error: true });
+  } finally {
+    setRefreshButtonState(els.refreshAllProgButton, false);
   }
+}
+
+function setRefreshButtonState(button, loading) {
+  if (!button) return;
+  button.disabled = loading;
+  button.textContent = loading ? "Refreshing..." : "Refresh";
 }
 
 function updateLiveState(data) {
@@ -394,6 +501,87 @@ function setActiveTab(tabName) {
   els.dashboardControls.classList.toggle("is-hidden", tabName !== "latest");
 }
 
+async function initializeFromUrlState(state) {
+  if (!state.reportUrl) return;
+  suppressUrlStateUpdate = true;
+  try {
+    localStorage.setItem(LAST_REPORT_URL_KEY, state.reportUrl);
+    pullSelect.value = state.fightId || "latest";
+    setActiveTab("latest");
+    await analyze(state.reportUrl, state.fightId || "latest", { skipUrlUpdate: true });
+
+    if (state.tab === "night") {
+      setActiveTab("night");
+      await loadWholeNight(state.reportUrl);
+    } else if (state.tab === "all-prog") {
+      setActiveTab("all-prog");
+      await loadAllProg(state.reportUrl);
+    } else {
+      setActiveTab("latest");
+    }
+  } finally {
+    suppressUrlStateUpdate = false;
+    updateUrlState({
+      tab: activeTab,
+      fightId: activeTab === "latest" && pullSelect.value !== "latest" ? pullSelect.value : state.fightId,
+    });
+  }
+}
+
+function parseUrlState() {
+  const params = new URLSearchParams(window.location.search);
+  const rawReport = params.get("report") || params.get("code") || "";
+  const reportCode = reportCodeFromInput(rawReport);
+  const reportUrl = reportCode ? `https://www.warcraftlogs.com/reports/${reportCode}` : "";
+  const fightId = params.get("fight") || params.get("pull") || fightIdFromInput(rawReport);
+  const tab = normalizeUrlTab(params.get("tab"), fightId);
+  return { reportUrl, reportCode, tab, fightId };
+}
+
+function normalizeUrlTab(tab, fightId = "") {
+  const value = String(tab || "").toLowerCase();
+  if (value === "night" || value === "whole-night") return "night";
+  if (value === "prog" || value === "all-prog" || value === "allprog") return "all-prog";
+  if (value === "pull" || value === "latest") return "latest";
+  return fightId ? "latest" : "latest";
+}
+
+function updateUrlState({ tab = activeTab, fightId = null } = {}) {
+  if (suppressUrlStateUpdate) return;
+  const reportCode = reportCodeFromInput(reportUrlInput.value.trim());
+  const url = new URL(window.location.href);
+  url.search = "";
+  if (reportCode) url.searchParams.set("report", reportCode);
+  const normalizedTab = normalizeUrlTab(tab);
+  if (reportCode) url.searchParams.set("tab", normalizedTab === "all-prog" ? "prog" : normalizedTab);
+  const selectedFightId = fightId ?? (normalizedTab === "latest" && pullSelect.value !== "latest" ? pullSelect.value : "");
+  if (reportCode && normalizedTab === "latest" && selectedFightId && selectedFightId !== "latest") {
+    url.searchParams.set("fight", selectedFightId);
+  }
+  window.history.replaceState({}, "", url);
+}
+
+function reportCodeFromInput(input) {
+  const value = String(input || "").trim();
+  if (!value) return "";
+  try {
+    const url = new URL(value);
+    const match = url.pathname.match(/\/reports\/([^/?#]+)/);
+    if (match) return match[1];
+  } catch {
+    // Fall through to report-code parsing.
+  }
+  return value.replace(/^https?:\/\/(www\.)?warcraftlogs\.com\/reports\//i, "").split(/[/?#&]/)[0];
+}
+
+function fightIdFromInput(input) {
+  try {
+    return new URL(String(input || "").trim()).searchParams.get("fight") || "";
+  } catch {
+    return "";
+  }
+}
+
 function renderDashboard(data) {
   const latest = data.latestWipe;
   const summary = data.summary;
@@ -407,7 +595,7 @@ function renderDashboard(data) {
   updateAllProgAccess(data.report.guild, data.boss);
   updateLiveState(data);
 
-  renderPullOptions(data.report.pulls || [], data.fight.id);
+  renderPullOptions(data.report.pulls || [], data.fight.id, data.requestedPullId);
 
   els.summaryGrid.innerHTML = [
     metric("Duration", data.fight.duration),
@@ -606,8 +794,8 @@ function renderAllProgPlaceholder() {
   els.allProgConsumables.innerHTML = empty("Loading all-prog consumable usage.");
 }
 
-function renderPullOptions(pulls, selectedFightId) {
-  const requested = pullSelect.value || "latest";
+function renderPullOptions(pulls, selectedFightId, requestedPullId = pullSelect.value || "latest") {
+  const requested = requestedPullId || "latest";
   pullSelect.innerHTML = [
     `<option value="latest">Latest wipe</option>`,
     ...pulls.map((pull) => {
@@ -844,31 +1032,167 @@ function currentMistakeMode(scope) {
   return document.querySelector(`input[name="${scope}-mistake-mode"]:checked`)?.value || "total";
 }
 
-function renderGlaiveTrend(points) {
+function trendPointsForScope(scope) {
+  const reportUrl = reportUrlInput.value.trim();
+  if (scope === "night") return nightCache.get(nightCacheKey(reportUrl))?.wholeNight?.glaiveHitsByNight || [];
+  if (scope === "all-prog") return allProgCache.get(allProgCacheKey(reportUrl))?.allProg?.glaiveHitsByNight || [];
+  return [];
+}
+
+function openTrendModal(scope) {
+  const points = trendPointsForScope(scope);
+  if (!points.length) return;
+  activeTrendScope = scope;
+  visibleTrendPlayers = new Set(allTrendPlayers(points).map((row) => trendPlayerKey(row.player)));
+  showOverallTrend = true;
+  els.trendModalTitle.textContent = scope === "all-prog" ? "All Prog Glaive Hits / Minute" : "Whole Night Glaive Hits / Minute";
+  renderTrendModal();
+  els.trendModal.classList.remove("is-hidden");
+}
+
+function closeTrendModal() {
+  activeTrendScope = null;
+  els.trendModal.classList.add("is-hidden");
+}
+
+function renderTrendModal() {
+  const points = trendPointsForScope(activeTrendScope);
+  const players = allTrendPlayers(points);
+  els.trendPlayerToggles.innerHTML = players.length
+    ? [renderTrendOverallToggle(), renderTrendSelectAllToggle(), ...players.map(renderTrendPlayerToggle)].join("")
+    : `<span class="empty-inline">No player series available yet.</span>`;
+  els.trendModalChart.innerHTML = renderGlaiveTrend(points, {
+    expanded: true,
+    visiblePlayers: visibleTrendPlayers,
+    showOverall: showOverallTrend,
+  });
+}
+
+function renderTrendOverallToggle() {
+  return `<button class="trend-player-toggle trend-overall-toggle ${showOverallTrend ? "is-active" : ""}" type="button" title="Click to toggle. Alt-click to isolate overall.">
+    <span class="legend-dot"></span>
+    Overall
+  </button>`;
+}
+
+function renderTrendSelectAllToggle() {
+  return `<button class="trend-player-toggle trend-select-all-toggle" type="button" title="Show overall and all players">
+    Select all
+  </button>`;
+}
+
+function renderTrendPlayerToggle(row) {
+  const key = trendPlayerKey(row.player);
+  const active = visibleTrendPlayers.has(key);
+  return `<button class="trend-player-toggle ${active ? "is-active" : ""}" type="button" data-player-key="${escapeHtml(key)}" title="Click to toggle. Double-click or Alt-click to isolate.">
+    <span class="trend-player-swatch ${classColorClass(row.player.class)}"></span>
+    ${escapeHtml(row.player.name)}
+  </button>`;
+}
+
+function isolateTrendPlayer(key) {
+  visibleTrendPlayers = new Set([key]);
+  showOverallTrend = false;
+  renderTrendModal();
+}
+
+function isolateOverallTrend() {
+  visibleTrendPlayers = new Set();
+  showOverallTrend = true;
+  renderTrendModal();
+}
+
+function selectAllTrendSeries() {
+  visibleTrendPlayers = new Set(allTrendPlayers(trendPointsForScope(activeTrendScope)).map((row) => trendPlayerKey(row.player)));
+  showOverallTrend = true;
+  renderTrendModal();
+}
+
+function allTrendPlayers(points) {
+  const rows = new Map();
+  for (const point of points) {
+    for (const item of point.players || []) {
+      const key = trendPlayerKey(item.player);
+      const row = rows.get(key) || { player: item.player, totalHits: 0, combatDurationMs: 0, pullCount: 0 };
+      row.totalHits += Number(item.totalHits || 0);
+      row.combatDurationMs += Number(item.combatDurationMs || 0);
+      row.pullCount += Number(item.pullCount || 0);
+      rows.set(key, row);
+    }
+  }
+  return [...rows.values()]
+    .map((row) => ({
+      ...row,
+      glaiveHitsPerMinute: row.combatDurationMs > 0 ? row.totalHits / (row.combatDurationMs / 60000) : 0,
+    }))
+    .sort(
+      (a, b) =>
+        Number(b.glaiveHitsPerMinute || 0) - Number(a.glaiveHitsPerMinute || 0) ||
+        Number(b.totalHits || 0) - Number(a.totalHits || 0) ||
+        a.player.name.localeCompare(b.player.name),
+    );
+}
+
+function trendPlayerKey(player) {
+  return `${String(player?.name || "").trim().toLowerCase()}:${String(player?.class || "").trim().toLowerCase()}`;
+}
+
+function renderGlaiveTrend(points, { expanded = false, visiblePlayers = new Set(), showOverall = true } = {}) {
   if (!points.length) return empty("No glaive hit trend data.");
   const plotsNightRates = points.some((point) => point.glaiveHitsPerMinute !== undefined);
   const valueForPoint = (point) =>
     plotsNightRates ? Number(point.glaiveHitsPerMinute || 0) : Number(point.count || 0);
   const formatTrendValue = (value) => (plotsNightRates ? Number(value || 0).toFixed(2) : formatNumber(value));
-  const width = Math.max(680, points.length * (plotsNightRates ? 90 : 26) + 42);
-  const height = 190;
-  const pad = { top: 18, right: 14, bottom: 34, left: 28 };
+  const playerRows = expanded
+    ? allTrendPlayers(points).filter((row) => visiblePlayers.has(trendPlayerKey(row.player)))
+    : [];
+  const playerValues = playerRows.flatMap((row) =>
+    points
+      .map((point) => playerTrendValue(point, row.player))
+      .filter((value) => value !== null),
+  );
+  const width = Math.max(expanded ? 980 : 680, points.length * (expanded ? 120 : plotsNightRates ? 90 : 26) + 42);
+  const height = expanded ? 430 : 190;
+  const pad = { top: 18, right: expanded ? 26 : 14, bottom: expanded ? 42 : 34, left: expanded ? 42 : 28 };
   const innerWidth = width - pad.left - pad.right;
   const innerHeight = height - pad.top - pad.bottom;
-  const maxCount = Math.max(...points.map(valueForPoint), 1);
+  const overallValues = showOverall ? points.map(valueForPoint) : [];
+  const highestVisibleValue = Math.max(...overallValues, ...playerValues, 0);
+  const maxCount = highestVisibleValue > 0 ? highestVisibleValue : 1;
   const xFor = (index) => pad.left + (points.length === 1 ? innerWidth / 2 : (index / (points.length - 1)) * innerWidth);
   const yFor = (value) => pad.top + innerHeight - (Number(value || 0) / maxCount) * innerHeight;
-  const values = points.map(valueForPoint);
-  const normalized = movingAverage(values, Math.min(5, Math.max(1, points.length)));
   const actualPath = points.map((point, index) => `${index === 0 ? "M" : "L"} ${xFor(index).toFixed(1)} ${yFor(valueForPoint(point)).toFixed(1)}`).join(" ");
-  const normalizedPath = normalized.map((value, index) => `${index === 0 ? "M" : "L"} ${xFor(index).toFixed(1)} ${yFor(value).toFixed(1)}`).join(" ");
+  const playerPaths = playerRows
+    .map((row) => {
+      const values = points.map((point) => playerTrendValue(point, row.player));
+      const path = values.map((value, index) => {
+        if (value === null) return "";
+        const hasPreviousPoint = values.slice(0, index).some((item) => item !== null);
+        return `${hasPreviousPoint ? "L" : "M"} ${xFor(index).toFixed(1)} ${yFor(value).toFixed(1)}`;
+      }).filter(Boolean).join(" ");
+      const dots = values
+        .map((value, index) => {
+          if (value === null) return "";
+          const point = points[index];
+          const label = point.globalLabel || point.label || `Night ${index + 1}`;
+          return `<circle class="trend-player-dot ${classColorClass(row.player.class)}" cx="${xFor(index).toFixed(1)}" cy="${yFor(value).toFixed(1)}" r="2.4"><title>${escapeHtml(row.player.name)} - ${escapeHtml(label)}: ${formatTrendValue(value)} hits / minute</title></circle>`;
+        })
+        .join("");
+      return `<g>
+        <path class="trend-player-line ${classColorClass(row.player.class)}" d="${path}"><title>${escapeHtml(row.player.name)}</title></path>
+        ${dots}
+      </g>`;
+    })
+    .join("");
   const xLabels = points
     .map((point, index) => {
-      if (points.length > 18 && index % Math.ceil(points.length / 12) !== 0 && index !== points.length - 1) return "";
+      const maxLabels = expanded ? 24 : 12;
+      if (points.length > maxLabels && index % Math.ceil(points.length / maxLabels) !== 0 && index !== points.length - 1) return "";
       return `<text class="trend-axis-label" x="${xFor(index).toFixed(1)}" y="${height - 12}" text-anchor="middle">${escapeHtml(point.globalNightNumber || point.globalPullNumber || point.wipeNumber || index + 1)}</text>`;
     })
     .join("");
-  const dots = points
+  const dots = showOverall
+    ? points
     .map((point, index) => {
       const x = xFor(index);
       const value = valueForPoint(point);
@@ -884,33 +1208,32 @@ function renderGlaiveTrend(points) {
         <text class="trend-point-label" x="${x.toFixed(1)}" y="${labelY.toFixed(1)}" text-anchor="middle">${formatTrendValue(value)}</text>
       </g>`;
     })
-    .join("");
+    .join("")
+    : "";
 
-  return `<div class="trend-chart">
-    <svg viewBox="0 0 ${width} ${height}" style="min-width:${width}px" role="img" aria-label="Glaive hits by pull">
+  return `<div class="trend-chart ${expanded ? "is-expanded" : "is-compact"}">
+    <svg viewBox="0 0 ${width} ${height}"${expanded ? ` style="min-width:${width}px"` : ""} role="img" aria-label="Glaive hits by pull">
       <line class="trend-axis" x1="${pad.left}" y1="${pad.top + innerHeight}" x2="${width - pad.right}" y2="${pad.top + innerHeight}"></line>
       <line class="trend-axis" x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + innerHeight}"></line>
       <text class="trend-axis-label" x="2" y="${pad.top + 4}">${formatTrendValue(maxCount)}</text>
       <text class="trend-axis-label" x="8" y="${pad.top + innerHeight + 4}">0</text>
-      <path class="trend-actual-line" d="${actualPath}"></path>
-      <path class="trend-normalized-line" d="${normalizedPath}"></path>
+      ${playerPaths}
+      ${showOverall ? `<path class="trend-actual-line" d="${actualPath}"></path>` : ""}
       ${dots}
       ${xLabels}
     </svg>
     <div class="trend-legend">
-      <span><i class="legend-dot"></i>${plotsNightRates ? "Hits / min" : "Hits"}</span>
-      <span><i class="legend-line"></i>Normalized curve</span>
+      ${showOverall ? `<span><i class="legend-dot"></i>${plotsNightRates ? "Overall hits / min" : "Overall hits"}</span>` : ""}
+      ${expanded ? `<span>${formatNumber(playerRows.length)} player lines shown</span>` : ""}
     </div>
   </div>`;
 }
 
-function movingAverage(values, windowSize) {
-  return values.map((_, index) => {
-    const start = Math.max(0, index - Math.floor(windowSize / 2));
-    const end = Math.min(values.length, index + Math.ceil(windowSize / 2));
-    const slice = values.slice(start, end);
-    return slice.reduce((total, value) => total + value, 0) / Math.max(slice.length, 1);
-  });
+function playerTrendValue(point, player) {
+  const key = trendPlayerKey(player);
+  const playerPoint = (point.players || []).find((item) => trendPlayerKey(item.player) === key);
+  if (!playerPoint || Number(playerPoint.pullCount || 0) <= 0) return null;
+  return Number(playerPoint.glaiveHitsPerMinute || 0);
 }
 
 function renderEchoSoaks(rows, { expandable = false } = {}) {

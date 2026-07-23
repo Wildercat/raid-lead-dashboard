@@ -146,7 +146,10 @@
         </section>
 
         <section id="night-tab" class="tab-panel is-hidden">
-          <div id="night-summary-grid" class="summary-grid"></div>
+          <div class="aggregate-toolbar">
+            <div id="night-summary-grid" class="summary-grid"></div>
+            <button id="refresh-night-button" class="scan-now-button" type="button">Refresh</button>
+          </div>
 
           <div class="module-grid">
             <section class="panel">
@@ -192,7 +195,10 @@
             <section class="panel glaive-panel">
               <header class="panel-header">
                 <h2>Glaive Hits / Minute</h2>
-                <span id="night-glaive-trend-count" class="count">0</span>
+                <div class="panel-actions">
+                  <button class="scan-now-button trend-expand-button" type="button" data-trend-scope="night">Expand</button>
+                  <span id="night-glaive-trend-count" class="count">0</span>
+                </div>
               </header>
               <div id="night-glaive-trend"></div>
             </section>
@@ -246,7 +252,10 @@
         </section>
 
         <section id="all-prog-tab" class="tab-panel is-hidden">
-          <div id="all-prog-summary-grid" class="summary-grid"></div>
+          <div class="aggregate-toolbar">
+            <div id="all-prog-summary-grid" class="summary-grid"></div>
+            <button id="refresh-all-prog-button" class="scan-now-button" type="button">Refresh</button>
+          </div>
 
           <div class="module-grid">
             <section class="panel">
@@ -292,7 +301,10 @@
             <section class="panel glaive-panel">
               <header class="panel-header">
                 <h2>Glaive Hits / Minute</h2>
-                <span id="all-prog-glaive-trend-count" class="count">0</span>
+                <div class="panel-actions">
+                  <button class="scan-now-button trend-expand-button" type="button" data-trend-scope="all-prog">Expand</button>
+                  <span id="all-prog-glaive-trend-count" class="count">0</span>
+                </div>
               </header>
               <div id="all-prog-glaive-trend"></div>
             </section>
@@ -346,6 +358,17 @@
         </section>
       </section>
     </main>
+    <div id="trend-modal" class="trend-modal is-hidden" role="dialog" aria-modal="true" aria-labelledby="trend-modal-title">
+      <button class="trend-modal-backdrop" type="button" data-close-trend-modal aria-label="Close expanded graph"></button>
+      <section class="trend-modal-panel">
+        <header class="trend-modal-header">
+          <h2 id="trend-modal-title">Glaive Hits / Minute</h2>
+          <button id="trend-modal-close" class="icon-button" type="button" aria-label="Close">Close</button>
+        </header>
+        <div id="trend-player-toggles" class="trend-player-toggles"></div>
+        <div id="trend-modal-chart"></div>
+      </section>
+    </div>
     <script type="module" src="/app.js"></script>
   </body>
 </html>
