@@ -10,5 +10,8 @@
     "start": "node app/server.mjs",
     "chatlog:uploader": "node tools/chatlog-uploader.mjs",
     "test": "node --check app/server.mjs && node --check wcl-beloren-analyze.mjs && node --check wcl-lura-analyze.mjs && node --check app/public/app.js && node --check tools/chatlog-uploader.mjs"
+  },
+  "dependencies": {
+    "pg": "^8.12.0"
   }
 }

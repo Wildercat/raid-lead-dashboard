@@ -5,13 +5,9 @@ services:
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /api/health
-    disk:
-      name: dashboard-cache
-      mountPath: /var/data
-      sizeGB: 1
     envVars:
-      - key: DATA_CACHE_DIR
-        value: /var/data/dashboard-cache
+      - key: DATABASE_URL
+        sync: false
       - key: WARCRAFT_LOGS_CLIENT_ID
         sync: false
       - key: WARCRAFT_LOGS_CLIENT_SECRET

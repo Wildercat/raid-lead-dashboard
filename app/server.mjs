@@ -15,6 +15,7 @@ const PORT = Number(process.env.PORT || 4173);
 const ROOT = fileURLToPath(new URL(".", import.meta.url));
 const PUBLIC_ROOT = join(ROOT, "public");
 const DATA_CACHE_ROOT = process.env.DATA_CACHE_DIR || defaultDataCacheRoot();
+const DATABASE_URL = process.env.DATABASE_URL || "";
 const CHAT_LOG_PATH = process.env.CHAT_LOG_PATH || "C:\\Users\\Abram Gornik\\Documents\\WowChatLog.txt";
 const STORE_VERSION = 20;
 const ENCOUNTER_ID_BELOREN = 3182;
@@ -36,6 +37,7 @@ const reportBuilds = new Map();
 const reportScans = new Map();
 const pullResponseCache = new Map();
 const nightResponseCache = new Map();
+let dbPoolPromise = null;
 const LURA_SYMBOL_CALL_CODES = new Map([
   ["t", "7242384"],
   ["circle", "134635"],
@@ -113,7 +115,7 @@ createServer(async (request, response) => {
     }
 
     if (request.method === "GET" && request.url === "/api/cache-status") {
-      return sendJson(response, 200, cacheStatus());
+      return sendJson(response, 200, await cacheStatus());
     }
 
     if (request.method === "POST" && request.url === "/api/analyze") {
@@ -307,7 +309,7 @@ async function getNightDashboardResponse(reportUrl, { fresh = false, kickAssignm
   if (!fresh && nightResponseCache.has(context.cacheKey)) return nightResponseCache.get(context.cacheKey);
 
   if (!fresh) {
-    const cachedSummary = readNightSummaryFromDisk(context.cacheKey);
+    const cachedSummary = await readNightSummary(context.cacheKey);
     if (cachedSummary) {
       const response = responseFromNightSummary(cachedSummary);
       setBoundedCache(nightResponseCache, context.cacheKey, response, MAX_NIGHT_RESPONSE_CACHE_ENTRIES);
@@ -324,7 +326,7 @@ async function getNightDashboardResponse(reportUrl, { fresh = false, kickAssignm
   normalizeBossResponse(result, context.adapter, reportUrl);
   attachChatLogData(result, context.shell.report, context.adapter);
   setBoundedCache(nightResponseCache, context.cacheKey, result, MAX_NIGHT_RESPONSE_CACHE_ENTRIES);
-  writeNightSummaryToDisk(context.cacheKey, nightSummaryFromResponse(reportUrl, result, context));
+  await writeNightSummary(context.cacheKey, nightSummaryFromResponse(reportUrl, result, context));
   return result;
 }
 
@@ -595,7 +597,7 @@ async function buildAllProgDashboard(currentStore, { discoverReports = false, ki
   if (discoverReports) await ensureGuildBossNightSummaries({ guildId, difficulty, adapter, kickAssignments });
 
   const stores = selectAllProgNightSummaries({
-    summaries: [...loadNightSummaries(), currentStore],
+    summaries: [...(await loadNightSummaries()), currentStore],
     guildId,
     difficulty,
     bossKey: adapter.key,
@@ -664,7 +666,7 @@ async function ensureGuildBossNightSummaries({ guildId, difficulty, adapter, kic
   const summaries = await fetchGuildBossReportSummaries({ guildID: guildId, difficulty, encounterID: adapter.encounterID });
   const configHash = configHashForAdapter(adapter, { kickAssignments });
   const storesByCode = new Map(
-    loadNightSummaries()
+    (await loadNightSummaries())
       .filter((store) => store.boss?.key === adapter.key)
       .filter((store) => (store.configHash || "default") === configHash)
       .map((store) => [store.reportCode, store]),
@@ -688,7 +690,7 @@ async function ensureGuildBossNightSummaries({ guildId, difficulty, adapter, kic
   }
 }
 
-function loadNightSummaries() {
+async function loadNightSummaries() {
   const summaries = new Map();
 
   for (const response of nightResponseCache.values()) {
@@ -698,6 +700,10 @@ function loadNightSummaries() {
       adapter,
       cacheKey: bossCacheKey(response.report?.code, adapter),
     });
+    if (summary?.cacheKey) summaries.set(summary.cacheKey, summary);
+  }
+
+  for (const summary of await loadNightSummariesFromDb()) {
     if (summary?.cacheKey) summaries.set(summary.cacheKey, summary);
   }
 
@@ -1329,7 +1335,8 @@ function nightSummaryPath(cacheKey) {
   return join(DATA_CACHE_ROOT, "night-summaries", `${cacheKey}.json`);
 }
 
-function cacheStatus() {
+async function cacheStatus() {
+  const db = await databaseStatus();
   return {
     cacheRoot: DATA_CACHE_ROOT,
     dataCacheDirConfigured: Boolean(process.env.DATA_CACHE_DIR),
@@ -1346,6 +1353,7 @@ function cacheStatus() {
       nightResponses: nightResponseCache.size,
       reportStores: reportStoreCache.size,
     },
+    database: db,
   };
 }
 
@@ -1366,6 +1374,138 @@ function cacheRootWritable() {
     unlinkSync(testPath);
     return true;
   } catch {
+    return false;
+  }
+}
+
+async function getDbPool() {
+  if (!DATABASE_URL) return null;
+  if (!dbPoolPromise) {
+    dbPoolPromise = (async () => {
+      const { Pool } = await import("pg");
+      const pool = new Pool({
+        connectionString: DATABASE_URL,
+        ssl: DATABASE_URL.includes("localhost") || DATABASE_URL.includes("127.0.0.1") ? false : { rejectUnauthorized: false },
+      });
+      await ensureDbSchema(pool);
+      return pool;
+    })().catch((error) => {
+      dbPoolPromise = null;
+      throw error;
+    });
+  }
+  return dbPoolPromise;
+}
+
+async function ensureDbSchema(pool) {
+  await pool.query(`
+    create table if not exists dashboard_night_summaries (
+      cache_key text primary key,
+      report_code text not null,
+      boss_key text not null,
+      guild_id bigint,
+      difficulty integer,
+      config_hash text not null default 'default',
+      fetched_at timestamptz not null default now(),
+      data jsonb not null
+    )
+  `);
+  await pool.query(`
+    create index if not exists dashboard_night_summaries_lookup
+      on dashboard_night_summaries (guild_id, boss_key, difficulty, config_hash)
+  `);
+}
+
+async function databaseStatus() {
+  if (!DATABASE_URL) return { configured: false };
+  try {
+    const pool = await getDbPool();
+    const result = await pool.query("select count(*)::int as count from dashboard_night_summaries");
+    return {
+      configured: true,
+      reachable: true,
+      nightSummaries: Number(result.rows[0]?.count || 0),
+    };
+  } catch (error) {
+    return {
+      configured: true,
+      reachable: false,
+      error: error.message,
+    };
+  }
+}
+
+async function readNightSummary(cacheKey) {
+  const dbSummary = await readNightSummaryFromDb(cacheKey);
+  if (dbSummary) return dbSummary;
+  return readNightSummaryFromDisk(cacheKey);
+}
+
+async function readNightSummaryFromDb(cacheKey) {
+  if (!DATABASE_URL) return null;
+  try {
+    const pool = await getDbPool();
+    const result = await pool.query("select data from dashboard_night_summaries where cache_key = $1", [cacheKey]);
+    return result.rows[0]?.data || null;
+  } catch (error) {
+    console.warn(`Could not read night summary cache ${cacheKey} from database: ${error.message}`);
+    return null;
+  }
+}
+
+async function loadNightSummariesFromDb() {
+  if (!DATABASE_URL) return [];
+  try {
+    const pool = await getDbPool();
+    const result = await pool.query("select data from dashboard_night_summaries");
+    return result.rows.map((row) => row.data).filter(Boolean);
+  } catch (error) {
+    console.warn(`Could not load night summaries from database: ${error.message}`);
+    return [];
+  }
+}
+
+async function writeNightSummary(cacheKey, data) {
+  if (!data) return;
+  const wroteToDb = await writeNightSummaryToDb(cacheKey, data);
+  if (!wroteToDb) writeNightSummaryToDisk(cacheKey, data);
+}
+
+async function writeNightSummaryToDb(cacheKey, data) {
+  if (!DATABASE_URL) return false;
+  try {
+    const pool = await getDbPool();
+    const guildId = data.report?.guild?.id ? Number(data.report.guild.id) : null;
+    const difficulty = data.report?.pulls?.find((pull) => !pull.kill)?.difficulty || data.fight?.difficulty || null;
+    await pool.query(
+      `
+        insert into dashboard_night_summaries
+          (cache_key, report_code, boss_key, guild_id, difficulty, config_hash, fetched_at, data)
+        values
+          ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+        on conflict (cache_key) do update set
+          report_code = excluded.report_code,
+          boss_key = excluded.boss_key,
+          guild_id = excluded.guild_id,
+          difficulty = excluded.difficulty,
+          config_hash = excluded.config_hash,
+          fetched_at = excluded.fetched_at,
+          data = excluded.data
+      `,
+      [
+        cacheKey,
+        data.reportCode,
+        data.boss?.key,
+        guildId,
+        difficulty,
+        data.configHash || "default",
+        data.fetchedAt || new Date().toISOString(),
+        JSON.stringify(data),
+      ],
+    );
+    return true;
+  } catch (error) {
+    console.warn(`Could not write night summary cache ${cacheKey} to database: ${error.message}`);
     return false;
   }
 }
