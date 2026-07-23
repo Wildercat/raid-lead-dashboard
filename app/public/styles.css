@@ -1555,7 +1555,8 @@ td strong {
 }
 
 .trend-chart.is-expanded svg {
-  width: max-content;
+  width: 100%;
+  min-width: 0;
 }
 
 .trend-axis {

@@ -1163,7 +1163,7 @@ function renderGlaiveTrend(points, { expanded = false, visiblePlayers = new Set(
       .map((point) => playerTrendValue(point, row.player))
       .filter((value) => value !== null),
   );
-  const width = Math.max(expanded ? 980 : 680, points.length * (expanded ? 120 : plotsNightRates ? 90 : 26) + 42);
+  const width = expanded ? 980 : 680;
   const height = expanded ? 430 : 190;
   const pad = { top: 18, right: expanded ? 26 : 14, bottom: expanded ? 42 : 34, left: expanded ? 42 : 28 };
   const innerWidth = width - pad.left - pad.right;
@@ -1187,7 +1187,11 @@ function renderGlaiveTrend(points, { expanded = false, visiblePlayers = new Set(
           if (value === null) return "";
           const point = points[index];
           const label = point.globalLabel || point.label || `Night ${index + 1}`;
-          return `<circle class="trend-player-dot ${classColorClass(row.player.class)}" cx="${xFor(index).toFixed(1)}" cy="${yFor(value).toFixed(1)}" r="2.4"><title>${escapeHtml(row.player.name)} - ${escapeHtml(label)}: ${formatTrendValue(value)} hits / minute</title></circle>`;
+          const title = `${row.player.name} - ${label}: ${formatTrendValue(value)} hits / minute`;
+          return `<g class="trend-node" title="${escapeHtml(title)}">
+            <title>${escapeHtml(title)}</title>
+            <circle class="trend-player-dot ${classColorClass(row.player.class)}" cx="${xFor(index).toFixed(1)}" cy="${yFor(value).toFixed(1)}" r="2.4"></circle>
+          </g>`;
         })
         .join("");
       return `<g>
@@ -1215,8 +1219,10 @@ function renderGlaiveTrend(points, { expanded = false, visiblePlayers = new Set(
         : point.globalPullNumber
         ? `${point.globalLabel || `Pull ${point.globalPullNumber}`} (${point.reportTitle || point.reportCode || "Report"} / ${point.label || `Wipe ${point.wipeNumber || index + 1}`})`
         : point.label || `Pull ${index + 1}`;
-      return `<g>
-        <circle class="trend-dot" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3.5"><title>${escapeHtml(tooltipLabel)}: ${formatTrendValue(value)} ${plotsNightRates ? "glaive hits / minute" : "glaive hits"}</title></circle>
+      const title = `${tooltipLabel}: ${formatTrendValue(value)} ${plotsNightRates ? "glaive hits / minute" : "glaive hits"}`;
+      return `<g class="trend-node" title="${escapeHtml(title)}">
+        <title>${escapeHtml(title)}</title>
+        <circle class="trend-dot" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3.5"></circle>
         <text class="trend-point-label" x="${x.toFixed(1)}" y="${labelY.toFixed(1)}" text-anchor="middle">${formatTrendValue(value)}</text>
       </g>`;
     })
@@ -1224,7 +1230,7 @@ function renderGlaiveTrend(points, { expanded = false, visiblePlayers = new Set(
     : "";
 
   return `<div class="trend-chart ${expanded ? "is-expanded" : "is-compact"}">
-    <svg viewBox="0 0 ${width} ${height}"${expanded ? ` style="min-width:${width}px"` : ""} role="img" aria-label="Glaive hits by pull">
+    <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Glaive hits by pull">
       <line class="trend-axis" x1="${pad.left}" y1="${pad.top + innerHeight}" x2="${width - pad.right}" y2="${pad.top + innerHeight}"></line>
       <line class="trend-axis" x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + innerHeight}"></line>
       <text class="trend-axis-label" x="2" y="${pad.top + 4}">${formatTrendValue(maxCount)}</text>
