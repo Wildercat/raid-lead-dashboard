@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -14,7 +14,7 @@ import { analyzeLuraData, fetchLuraFightData, fetchLuraReportData, LURA_ENCOUNTE
 const PORT = Number(process.env.PORT || 4173);
 const ROOT = fileURLToPath(new URL(".", import.meta.url));
 const PUBLIC_ROOT = join(ROOT, "public");
-const DATA_CACHE_ROOT = process.env.DATA_CACHE_DIR || join(ROOT, "..", ".data-cache");
+const DATA_CACHE_ROOT = process.env.DATA_CACHE_DIR || defaultDataCacheRoot();
 const CHAT_LOG_PATH = process.env.CHAT_LOG_PATH || "C:\\Users\\Abram Gornik\\Documents\\WowChatLog.txt";
 const STORE_VERSION = 20;
 const ENCOUNTER_ID_BELOREN = 3182;
@@ -24,6 +24,13 @@ const MAX_PULL_RESPONSE_CACHE_ENTRIES = 60;
 const MAX_NIGHT_RESPONSE_CACHE_ENTRIES = 12;
 const MAX_REPORT_STORE_CACHE_ENTRIES = 6;
 const MAX_STORED_PULL_DETAILS = 30;
+
+function defaultDataCacheRoot() {
+  return process.platform !== "win32" && existsSync("/var/data") ? "/var/data/dashboard-cache" : join(ROOT, "..", ".data-cache");
+}
+
+console.log(`Dashboard cache root: ${DATA_CACHE_ROOT}`);
+
 const reportStoreCache = new Map();
 const reportBuilds = new Map();
 const reportScans = new Map();
@@ -103,6 +110,10 @@ createServer(async (request, response) => {
         ok: true,
         service: "beloren-dashboard",
       });
+    }
+
+    if (request.method === "GET" && request.url === "/api/cache-status") {
+      return sendJson(response, 200, cacheStatus());
     }
 
     if (request.method === "POST" && request.url === "/api/analyze") {
@@ -1318,6 +1329,47 @@ function nightSummaryPath(cacheKey) {
   return join(DATA_CACHE_ROOT, "night-summaries", `${cacheKey}.json`);
 }
 
+function cacheStatus() {
+  return {
+    cacheRoot: DATA_CACHE_ROOT,
+    dataCacheDirConfigured: Boolean(process.env.DATA_CACHE_DIR),
+    varDataExists: process.platform !== "win32" && existsSync("/var/data"),
+    cacheRootExists: existsSync(DATA_CACHE_ROOT),
+    writable: cacheRootWritable(),
+    disk: {
+      nightSummaries: countJsonFiles(join(DATA_CACHE_ROOT, "night-summaries")),
+      reports: countJsonFiles(join(DATA_CACHE_ROOT, "reports")),
+      chatEvents: countJsonFiles(join(DATA_CACHE_ROOT, "chat-events")),
+    },
+    memory: {
+      pullResponses: pullResponseCache.size,
+      nightResponses: nightResponseCache.size,
+      reportStores: reportStoreCache.size,
+    },
+  };
+}
+
+function countJsonFiles(dir) {
+  if (!existsSync(dir)) return 0;
+  try {
+    return readdirSync(dir).filter((file) => file.endsWith(".json")).length;
+  } catch {
+    return 0;
+  }
+}
+
+function cacheRootWritable() {
+  const testPath = join(DATA_CACHE_ROOT, ".write-test");
+  try {
+    mkdirSync(DATA_CACHE_ROOT, { recursive: true });
+    writeFileSync(testPath, String(Date.now()));
+    unlinkSync(testPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function readReportStoreFromDisk(reportCode) {
   const path = reportStorePath(reportCode);
   if (!existsSync(path)) return null;
@@ -1345,14 +1397,22 @@ function readNightSummaryFromDisk(cacheKey) {
 }
 
 function writeReportStoreToDisk(reportCode, data) {
-  mkdirSync(join(DATA_CACHE_ROOT, "reports"), { recursive: true });
-  writeFileSync(reportStorePath(reportCode), JSON.stringify(data));
+  try {
+    mkdirSync(join(DATA_CACHE_ROOT, "reports"), { recursive: true });
+    writeFileSync(reportStorePath(reportCode), JSON.stringify(data));
+  } catch (error) {
+    console.warn(`Could not write report cache ${reportCode}: ${error.message}`);
+  }
 }
 
 function writeNightSummaryToDisk(cacheKey, data) {
   if (!data) return;
-  mkdirSync(join(DATA_CACHE_ROOT, "night-summaries"), { recursive: true });
-  writeFileSync(nightSummaryPath(cacheKey), JSON.stringify(data));
+  try {
+    mkdirSync(join(DATA_CACHE_ROOT, "night-summaries"), { recursive: true });
+    writeFileSync(nightSummaryPath(cacheKey), JSON.stringify(data));
+  } catch (error) {
+    console.warn(`Could not write night summary cache ${cacheKey}: ${error.message}`);
+  }
 }
 
 function readJsonBody(request) {
